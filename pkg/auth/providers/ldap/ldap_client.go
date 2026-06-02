@@ -168,7 +168,7 @@ func (p *ldapProvider) getPrincipalsFromSearchResult(result *ldapv3.SearchResult
 		query = fmt.Sprintf("(&%s%s)", filter, query)
 		// Pulling user's groups
 		logrus.Debugf("Ldap: Query for pulling user's groups: %s", query)
-		userMemberGroupPrincipals, err := p.searchLdap(query, groupScope, config, lConn)
+		userMemberGroupPrincipals, err := p.searchLdap(query, groupScope, config, lConn, 0, 0)
 		groupPrincipals = append(groupPrincipals, userMemberGroupPrincipals...)
 		if err != nil {
 			return userPrincipal, groupPrincipals, err
@@ -193,7 +193,7 @@ func (p *ldapProvider) getPrincipalsFromSearchResult(result *ldapv3.SearchResult
 			ObjectClass,
 			ldap.SanitizeAttr(config.GroupObjectClass),
 		)
-		newGroupPrincipals, err := p.searchLdap(query, groupScope, config, lConn)
+		newGroupPrincipals, err := p.searchLdap(query, groupScope, config, lConn, 0, 0)
 		if err != nil {
 			return userPrincipal, groupPrincipals, err
 		}
@@ -216,7 +216,7 @@ func (p *ldapProvider) getPrincipalsFromSearchResult(result *ldapv3.SearchResult
 			ObjectClass,
 			ldap.SanitizeAttr(config.GroupObjectClass),
 		)
-		groupPrincipals, err = p.searchLdap(query, groupScope, config, lConn)
+		groupPrincipals, err = p.searchLdap(query, groupScope, config, lConn, 0, 0)
 		if err != nil {
 			return userPrincipal, groupPrincipals, err
 		}
@@ -364,11 +364,11 @@ func (p *ldapProvider) getPrincipal(distinguishedName string, scope string, conf
 	return principal, nil
 }
 
-func (p *ldapProvider) searchPrincipals(name, principalType string, config *v3.LdapConfig, lConn ldapv3.Client) ([]v3.Principal, error) {
+func (p *ldapProvider) searchPrincipals(name, principalType string, config *v3.LdapConfig, lConn ldapv3.Client, page int, pageSize int) ([]v3.Principal, error) {
 	var principals []v3.Principal
 
 	if principalType == "" || principalType == "user" {
-		userPrincipals, err := p.searchUser(name, config, lConn)
+		userPrincipals, err := p.searchUser(name, config, lConn, page, pageSize)
 		if err != nil {
 			return nil, err
 		}
@@ -376,7 +376,7 @@ func (p *ldapProvider) searchPrincipals(name, principalType string, config *v3.L
 	}
 
 	if principalType == "" || principalType == "group" {
-		groupPrincipals, err := p.searchGroup(name, config, lConn)
+		groupPrincipals, err := p.searchGroup(name, config, lConn, page, pageSize)
 		if err != nil {
 			return nil, err
 		}
@@ -386,10 +386,8 @@ func (p *ldapProvider) searchPrincipals(name, principalType string, config *v3.L
 	return principals, nil
 }
 
-func (p *ldapProvider) searchUser(name string, config *v3.LdapConfig, lConn ldapv3.Client) ([]v3.Principal, error) {
+func (p *ldapProvider) searchUser(name string, config *v3.LdapConfig, lConn ldapv3.Client, page int, pageSize int) ([]v3.Principal, error) {
 	if config.UserSearchFilter != "" {
-		// Make sure user search filter contains a valid LDAP query expression
-		// before interpolating it into the search filter.
 		if _, err := ldapv3.CompileFilter(config.UserSearchFilter); err != nil {
 			return nil, fmt.Errorf("invalid user search filter")
 		}
@@ -400,23 +398,18 @@ func (p *ldapProvider) searchUser(name string, config *v3.LdapConfig, lConn ldap
 	srchAttrs := "(|"
 	for _, attr := range srchAttributes {
 		if attr == "uidNumber" {
-			// Specific integer match, can't use the wildcard.
 			srchAttrs += fmt.Sprintf("(%s=%s)", ldapv3.EscapeFilter(attr), ldapv3.EscapeFilter(name))
 		} else {
 			srchAttrs += fmt.Sprintf("(%s=%s*)", ldapv3.EscapeFilter(attr), ldapv3.EscapeFilter(name))
 		}
 	}
-	// The user search filter will be added as another clause
-	// and is expected to follow ldap syntax and enclosed in parentheses.
 	query += srchAttrs + ")" + config.UserSearchFilter + ")"
 	logrus.Debugf("%s searchUser query: %s", p.providerName, query)
-	return p.searchLdap(query, p.userScope, config, lConn)
+	return p.searchLdap(query, p.userScope, config, lConn, page, pageSize)
 }
 
-func (p *ldapProvider) searchGroup(name string, config *v3.LdapConfig, lConn ldapv3.Client) ([]v3.Principal, error) {
+func (p *ldapProvider) searchGroup(name string, config *v3.LdapConfig, lConn ldapv3.Client, page int, pageSize int) ([]v3.Principal, error) {
 	if config.GroupSearchFilter != "" {
-		// Make sure group search filter contains a valid LDAP query expression
-		// before interpolating it into the search filter.
 		if _, err := ldapv3.CompileFilter(config.GroupSearchFilter); err != nil {
 			return nil, fmt.Errorf("invalid group search filter")
 		}
@@ -424,7 +417,6 @@ func (p *ldapProvider) searchGroup(name string, config *v3.LdapConfig, lConn lda
 
 	searchFmt := ldap.SanitizeAttr(config.GroupSearchAttribute) + "=*%s*"
 	if config.GroupSearchAttribute == "gidNumber" {
-		// Specific integer match, can't use the wildcard.
 		searchFmt = ldap.SanitizeAttr(config.GroupSearchAttribute) + "=%s"
 	}
 
@@ -437,10 +429,10 @@ func (p *ldapProvider) searchGroup(name string, config *v3.LdapConfig, lConn lda
 	)
 
 	logrus.Debugf("%s searchGroup query: %s scope: %s", p.providerName, query, p.groupScope)
-	return p.searchLdap(query, p.groupScope, config, lConn)
+	return p.searchLdap(query, p.groupScope, config, lConn, page, pageSize)
 }
 
-func (p *ldapProvider) searchLdap(query string, scope string, config *v3.LdapConfig, lConn ldapv3.Client) ([]v3.Principal, error) {
+func (p *ldapProvider) searchLdap(query string, scope string, config *v3.LdapConfig, lConn ldapv3.Client, page int, pageSize int) ([]v3.Principal, error) {
 	var principals []v3.Principal
 	var search *ldapv3.SearchRequest
 
@@ -463,7 +455,6 @@ func (p *ldapProvider) searchLdap(query string, scope string, config *v3.LdapCon
 		)
 	}
 
-	// Bind before query
 	serviceAccountUsername := ldap.GetUserExternalID(config.ServiceAccountDistinguishedName, "")
 	err := lConn.Bind(serviceAccountUsername, config.ServiceAccountPassword)
 	if err != nil {
@@ -478,20 +469,33 @@ func (p *ldapProvider) searchLdap(query string, scope string, config *v3.LdapCon
 		}
 	}
 
-	for i := 0; i < len(results.Entries); i++ {
-		externalID := results.Entries[i].DN
-		entry := results.Entries[i]
+	entries := results.Entries
+	if pageSize > 0 && page > 0 {
+		startIdx := (page - 1) * pageSize
+		if startIdx >= len(entries) {
+			return principals, nil
+		}
+		endIdx := startIdx + pageSize
+		if endIdx > len(entries) {
+			endIdx = len(entries)
+		}
+		entries = entries[startIdx:endIdx]
+	}
+
+	for i := 0; i < len(entries); i++ {
+		externalID := entries[i].DN
+		entry := entries[i]
 
 		if p.samlSearchProvider() {
 			if strings.EqualFold("user", entityType) {
 				userLoginValues := ldap.GetAttributeValuesByName(entry.Attributes, config.UserLoginAttribute)
 				if len(userLoginValues) > 0 {
-					externalID = userLoginValues[0] // only support first
+					externalID = userLoginValues[0]
 				}
 			} else {
 				groupDNValues := ldap.GetAttributeValuesByName(entry.Attributes, config.GroupDNAttribute)
 				if len(groupDNValues) > 0 {
-					externalID = groupDNValues[0] // only support first
+					externalID = groupDNValues[0]
 				}
 			}
 		}
