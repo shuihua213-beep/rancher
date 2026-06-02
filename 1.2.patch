@@ -1,0 +1,412 @@
+diff --git a/pkg/auth/providers/azure/clients/group_cache.go b/pkg/auth/providers/azure/clients/group_cache.go
+index f14cb222a..3f2456341 100644
+--- a/pkg/auth/providers/azure/clients/group_cache.go
++++ b/pkg/auth/providers/azure/clients/group_cache.go
+@@ -1,21 +1,82 @@
+ package clients
+ 
+ import (
++	"fmt"
+ 	"time"
+ 
+ 	lru "github.com/hashicorp/golang-lru"
+ 	v3 "github.com/rancher/rancher/pkg/apis/management.cattle.io/v3"
+ 	"github.com/sirupsen/logrus"
+ 	"golang.org/x/sync/errgroup"
++	"golang.org/x/sync/singleflight"
+ )
+ 
+ // GroupCache is an in-memory cache of group principals.
+ var GroupCache *lru.Cache
+ 
++var groupLookupGroup singleflight.Group
++
+ type userPrincipalsClient interface {
+ 	GetGroup(id string) (v3.Principal, error)
+ }
+ 
++func cachedGroupPrincipal(groupID string) (v3.Principal, bool) {
++	if GroupCache == nil {
++		return v3.Principal{}, false
++	}
++
++	principal, ok := GroupCache.Get(groupID)
++	if !ok {
++		return v3.Principal{}, false
++	}
++
++	p, ok := principal.(v3.Principal)
++	if !ok {
++		logrus.Errorf("failed to convert a cached group to principal")
++		return v3.Principal{}, false
++	}
++
++	return p, true
++}
++
++func cacheGroupPrincipal(groupID string, principal v3.Principal) {
++	if GroupCache == nil {
++		return
++	}
++
++	GroupCache.Add(groupID, principal)
++}
++
++func getGroupPrincipal(azureClient userPrincipalsClient, groupID string) (v3.Principal, error) {
++	if principal, ok := cachedGroupPrincipal(groupID); ok {
++		return principal, nil
++	}
++
++	principal, err, _ := groupLookupGroup.Do(groupID, func() (interface{}, error) {
++		if cachedPrincipal, ok := cachedGroupPrincipal(groupID); ok {
++			return cachedPrincipal, nil
++		}
++
++		groupObj, err := azureClient.GetGroup(groupID)
++		if err != nil {
++			return v3.Principal{}, err
++		}
++		groupObj.MemberOf = true
++		cacheGroupPrincipal(groupID, groupObj)
++		return groupObj, nil
++	})
++	if err != nil {
++		return v3.Principal{}, err
++	}
++
++	groupPrincipal, ok := principal.(v3.Principal)
++	if !ok {
++		return v3.Principal{}, fmt.Errorf("failed to convert a fetched group to principal")
++	}
++
++	return groupPrincipal, nil
++}
++
+ // UserGroupsToPrincipals attempts to convert a value representing a collection of groups to a slice of principal values.
+ // It also stores group values in an in-memory cache for faster subsequent access.
+ func UserGroupsToPrincipals(azureClient userPrincipalsClient, groupNames []string) ([]v3.Principal, error) {
+@@ -33,30 +94,18 @@ func UserGroupsToPrincipals(azureClient userPrincipalsClient, groupNames []strin
+ 		j := i
+ 		groupID := id
+ 
+-		if principal, ok := GroupCache.Get(groupID); ok {
+-			p, ok := principal.(v3.Principal)
+-			if !ok {
+-				logrus.Errorf("failed to convert a cached group to principal")
+-				continue
+-			}
+-			groupPrincipals[j] = p
++		if principal, ok := cachedGroupPrincipal(groupID); ok {
++			groupPrincipals[j] = principal
+ 			continue
+ 		}
+ 
+ 		tasksManager.Go(func() error {
+-			// This is inefficient for a collection of msgraph.Group. This is temporary - until support for Azure AD Graph is removed.
+-			// The SDK for Microsoft Graph returns actual groups when queried for a user's group memberships.
+-			// The SDK for Azure AD Graph returns group names as strings.
+-			// The common interface that abstracts the Graph operations returns group names as strings.
+-			// So Microsoft Graph groups are effectively fetched twice. But this happens only once - before the groups are added to the cache.
+-			groupObj, err := azureClient.GetGroup(groupID)
++			groupObj, err := getGroupPrincipal(azureClient, groupID)
+ 			if err != nil {
+ 				logrus.Errorf("[AZURE_PROVIDER] Error getting group: %v", err)
+ 				return err
+ 			}
+-			groupObj.MemberOf = true
+ 
+-			GroupCache.Add(groupID, groupObj)
+ 			groupPrincipals[j] = groupObj
+ 			return nil
+ 		})
+diff --git a/pkg/auth/providers/azure/clients/group_cache_test.go b/pkg/auth/providers/azure/clients/group_cache_test.go
+index 1d4a94fb8..d679e23df 100644
+--- a/pkg/auth/providers/azure/clients/group_cache_test.go
++++ b/pkg/auth/providers/azure/clients/group_cache_test.go
+@@ -1,7 +1,10 @@
+ package clients
+ 
+ import (
++	"sync"
++	"sync/atomic"
+ 	"testing"
++	"time"
+ 
+ 	lru "github.com/hashicorp/golang-lru"
+ 	v3 "github.com/rancher/rancher/pkg/apis/management.cattle.io/v3"
+@@ -17,7 +20,7 @@ func TestUserGroupsToPrincipals(t *testing.T) {
+ 
+ 	fc := &fakePrincipalsClient{
+ 		groups: map[string]fakeGroup{
+-			testGUID: fakeGroup{id: ptr.To(testGUID)},
++			testGUID: {id: ptr.To(testGUID)},
+ 		},
+ 	}
+ 	principals, err := UserGroupsToPrincipals(fc, []string{testGUID})
+@@ -36,11 +39,72 @@ func TestUserGroupsToPrincipals(t *testing.T) {
+ 	assert.Equal(t, want, principals)
+ }
+ 
++func TestUserGroupsToPrincipals_CoalescesConcurrentCacheMisses(t *testing.T) {
++	setupTestCache(t)
++	testGUID := "0f8fad5b-d9cb-469f-a165-70867728950e"
++	want := []v3.Principal{
++		{
++			ObjectMeta: metav1.ObjectMeta{
++				Name: "azuread_group://0f8fad5b-d9cb-469f-a165-70867728950e",
++			},
++			PrincipalType: "group",
++			MemberOf:      true,
++			Provider:      "azuread",
++		},
++	}
++
++	fc := &fakePrincipalsClient{
++		delay: 50 * time.Millisecond,
++		groups: map[string]fakeGroup{
++			testGUID: {id: ptr.To(testGUID)},
++		},
++	}
++
++	const callers = 32
++	start := make(chan struct{})
++	results := make(chan []v3.Principal, callers)
++	errs := make(chan error, callers)
++
++	var wg sync.WaitGroup
++	for i := 0; i < callers; i++ {
++		wg.Add(1)
++		go func() {
++			defer wg.Done()
++			<-start
++			principals, err := UserGroupsToPrincipals(fc, []string{testGUID})
++			if err != nil {
++				errs <- err
++				return
++			}
++			results <- principals
++		}()
++	}
++
++	close(start)
++	wg.Wait()
++	close(errs)
++	close(results)
++
++	for err := range errs {
++		require.NoError(t, err)
++	}
++	for principals := range results {
++		assert.Equal(t, want, principals)
++	}
++	assert.EqualValues(t, 1, fc.calls.Load())
++}
++
+ type fakePrincipalsClient struct {
+ 	groups map[string]fakeGroup
++	delay  time.Duration
++	calls  atomic.Int32
+ }
+ 
+ func (f *fakePrincipalsClient) GetGroup(id string) (v3.Principal, error) {
++	f.calls.Add(1)
++	if f.delay > 0 {
++		time.Sleep(f.delay)
++	}
+ 	return groupToPrincipal(f.groups[id]), nil
+ }
+ 
+diff --git a/pkg/auth/providers/azure/clients/ms_graph_client.go b/pkg/auth/providers/azure/clients/ms_graph_client.go
+index 41f85dfe0..2882cbed0 100644
+--- a/pkg/auth/providers/azure/clients/ms_graph_client.go
++++ b/pkg/auth/providers/azure/clients/ms_graph_client.go
+@@ -27,6 +27,7 @@
+ 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+ 	"k8s.io/utils/ptr"
+ 	"sigs.k8s.io/controller-runtime/pkg/client"
++	"golang.org/x/sync/singleflight"
+ )
+ 
+ const (
+@@ -37,6 +38,8 @@
+ 	cacheLogPrefix    = "AZUREAD_PROVIDER_CACHE"
+ )
+ 
++var userGroupPrincipalsLookup singleflight.Group
++
+ // NewMSGraphClient creates and returns a new client for accessing the Azure
+ // Graph client.
+ 
+@@ -99,6 +102,7 @@ func NewMSGraphClient(config *v3.AzureADConfig, secrets wcorev1.SecretController
+ 	return &AzureMSGraphClient{
+ 		Credential:         cred,
+ 		GraphEndpointURL:   graphEndpoint,
++		GroupRequestKey:    authorityURL,
+ 		GraphClient:        graphClient,
+ 		ConfidentialClient: confidentialClient,
+ 		authResult:         authResult,
+@@ -109,10 +113,12 @@ func NewMSGraphClient(config *v3.AzureADConfig, secrets wcorev1.SecretController
+ type AzureMSGraphClient struct {
+ 	confidential.Credential
+ 	GraphEndpointURL   string
++	GroupRequestKey    string
+ 	authResult         *customAuthResult
+ 	ConfidentialClient confidential.Client
+ 
+-	GraphClient *msgraphsdk.GraphServiceClient
++	GraphClient               *msgraphsdk.GraphServiceClient
++	listGroupMembershipsFunc  func(ctx context.Context, userID string, filter string, f func(*models.Group)) error
+ }
+ 
+ // GetUser takes a user ID and fetches the user principal from the Microsoft Graph API.
+@@ -289,23 +295,44 @@ func (c AzureMSGraphClient) LoginUser(config *v3.AzureADConfig, credential *v3.A
+ 	return userPrincipal, groupPrincipals, "", rawIDToken, nil
+ }
+ 
++func (c AzureMSGraphClient) listGroupMembershipsLoader(ctx context.Context, userID string, filter string, f func(*models.Group)) error {
++	if c.listGroupMembershipsFunc != nil {
++		return c.listGroupMembershipsFunc(ctx, userID, filter, f)
++	}
++
++	return c.listGroupMemberships(ctx, userID, filter, f)
++}
++
+ func (c AzureMSGraphClient) listGroupPrincipals(ctx context.Context, userPrincipal v3.Principal, filter string) ([]v3.Principal, error) {
+-	var groups []string
+-	err := c.listGroupMemberships(ctx, GetPrincipalID(userPrincipal), filter, func(g *models.Group) {
+-		if id := g.GetId(); id != nil && g.GetDisplayName() != nil && g.GetSecurityEnabled() != nil {
+-			groups = append(groups, *id)
++	userID := GetPrincipalID(userPrincipal)
++	lookupKey := c.GroupRequestKey + "\x00" + userID + "\x00" + filter
++
++	result, err, _ := userGroupPrincipalsLookup.Do(lookupKey, func() (interface{}, error) {
++		groupPrincipals := make([]v3.Principal, 0)
++		err := c.listGroupMembershipsLoader(ctx, userID, filter, func(g *models.Group) {
++			if id := g.GetId(); id != nil && g.GetDisplayName() != nil && g.GetSecurityEnabled() != nil {
++				groupPrincipal := groupToPrincipal(g)
++				groupPrincipal.MemberOf = true
++				cacheGroupPrincipal(*id, groupPrincipal)
++				groupPrincipals = append(groupPrincipals, groupPrincipal)
++			}
++		})
++		if err != nil {
++			return nil, fmt.Errorf("listing group memberships: %w", err)
+ 		}
++
++		return groupPrincipals, nil
+ 	})
+ 	if err != nil {
+-		return nil, fmt.Errorf("listing group memberships: %w", err)
++		return nil, err
+ 	}
+ 
+-	groupPrincipals, err := UserGroupsToPrincipals(c, groups)
+-	if err != nil {
+-		return nil, fmt.Errorf("converting groups to principals: %w", err)
++	groupPrincipals, ok := result.([]v3.Principal)
++	if !ok {
++		return nil, fmt.Errorf("converting groups to principals: unexpected result type %T", result)
+ 	}
+ 
+-	return groupPrincipals, nil
++	return append([]v3.Principal(nil), groupPrincipals...), nil
+ }
+ 
+ func (c AzureMSGraphClient) getOIDFromLogin(config *v3.AzureADConfig, credential *v3.AzureADLogin) (oid string, rawIDToken string, err error) {
+diff --git a/pkg/auth/providers/azure/clients/ms_graph_client_concurrency_test.go b/pkg/auth/providers/azure/clients/ms_graph_client_concurrency_test.go
+new file mode 100644
+index 000000000..f0137f8b1
+--- /dev/null
++++ b/pkg/auth/providers/azure/clients/ms_graph_client_concurrency_test.go
+@@ -0,0 +1,91 @@
++package clients
++
++import (
++	"context"
++	"sync"
++	"sync/atomic"
++	"testing"
++	"time"
++
++	"github.com/microsoftgraph/msgraph-sdk-go/models"
++	v3 "github.com/rancher/rancher/pkg/apis/management.cattle.io/v3"
++	"github.com/stretchr/testify/assert"
++	"github.com/stretchr/testify/require"
++	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
++)
++
++func TestAzureMSGraphClient_listGroupPrincipals_CoalescesConcurrentRequests(t *testing.T) {
++	setupTestCache(t)
++
++	const callers = 32
++	userID := "user-1"
++	groupID := "group-1"
++	displayName := "test-group"
++	securityEnabled := true
++	want := []v3.Principal{
++		{
++			ObjectMeta: metav1.ObjectMeta{Name: "azuread_group://group-1"},
++			DisplayName:   displayName,
++			PrincipalType: "group",
++			Provider:      Name,
++			MemberOf:      true,
++		},
++	}
++
++	var membershipCalls atomic.Int32
++	client := AzureMSGraphClient{
++		GroupRequestKey: t.Name(),
++		listGroupMembershipsFunc: func(ctx context.Context, requestedUserID string, filter string, f func(*models.Group)) error {
++			if requestedUserID != userID {
++				return assert.AnError
++			}
++
++			membershipCalls.Add(1)
++			time.Sleep(50 * time.Millisecond)
++
++			group := models.NewGroup()
++			group.SetId(&groupID)
++			group.SetDisplayName(&displayName)
++			group.SetSecurityEnabled(&securityEnabled)
++			f(group)
++			return nil
++		},
++	}
++	userPrincipal := v3.Principal{ObjectMeta: metav1.ObjectMeta{Name: Name + "_user://" + userID}}
++
++	start := make(chan struct{})
++	results := make(chan []v3.Principal, callers)
++	errs := make(chan error, callers)
++
++	var wg sync.WaitGroup
++	for i := 0; i < callers; i++ {
++		wg.Add(1)
++		go func() {
++			defer wg.Done()
++			<-start
++			principals, err := client.listGroupPrincipals(context.Background(), userPrincipal, "")
++			if err != nil {
++				errs <- err
++				return
++			}
++			results <- principals
++		}()
++	}
++
++	close(start)
++	wg.Wait()
++	close(errs)
++	close(results)
++
++	for err := range errs {
++		require.NoError(t, err)
++	}
++	for principals := range results {
++		assert.Equal(t, want, principals)
++	}
++	assert.EqualValues(t, 1, membershipCalls.Load())
++
++	cachedGroup, ok := cachedGroupPrincipal(groupID)
++	require.True(t, ok)
++	assert.Equal(t, want[0], cachedGroup)
++}
