@@ -1,0 +1,122 @@
+diff --git a/pkg/api/norman/customization/cluster/actions_kubeconfig_test.go b/pkg/api/norman/customization/cluster/actions_kubeconfig_test.go
+index 2e379861e..dad6ccac7 100644
+--- a/pkg/api/norman/customization/cluster/actions_kubeconfig_test.go
++++ b/pkg/api/norman/customization/cluster/actions_kubeconfig_test.go
+@@ -5,6 +5,7 @@
+ 	"net/http"
+ 	"testing"
+ 
++	"github.com/rancher/norman/httperror"
+ 	"github.com/rancher/norman/types"
+ 	"github.com/rancher/norman/types/convert"
+ 	apimgmtv3 "github.com/rancher/rancher/pkg/apis/management.cattle.io/v3"
+@@ -33,7 +34,9 @@ func TestGenerateKubeconfigActionHandler(t *testing.T) {
+ 		nodeListerErr    error
+ 		tokenCreateErr   error
+ 
+-		wantErr bool
++		wantErr          bool
++		wantErrCode      httperror.ErrorCode
++		clusterAce       bool
+ 	}{
+ 		{
+ 			name:          "no token generation",
+@@ -57,6 +60,30 @@ func TestGenerateKubeconfigActionHandler(t *testing.T) {
+ 			hostname:      "https://set-hostname.fake",
+ 			wantErr:       false,
+ 		},
++		{
++			name:             "cluster not found",
++			clusterLookupErr: httperror.NewAPIError(httperror.NotFound, "cluster not found"),
++			wantErr:          true,
++			wantErrCode:      httperror.NotFound,
++		},
++		{
++			name:             "permission denied",
++			clusterLookupErr: httperror.NewAPIError(httperror.PermissionDenied, "can not get cluster"),
++			wantErr:          true,
++			wantErrCode:      httperror.PermissionDenied,
++		},
++		{
++			name:          "node lister error",
++			generateToken: "false",
++			nodeListerErr: fmt.Errorf("failed to list nodes"),
++			wantErr:       true,
++		},
++		{
++			name:           "token create error",
++			generateToken:  "true",
++			tokenCreateErr: true,
++			wantErr:        true,
++		},
+ 	}
+ 
+ 	const (
+@@ -67,17 +94,22 @@ func TestGenerateKubeconfigActionHandler(t *testing.T) {
+ 
+ 	ctrl := gomock.NewController(t)
+ 	userManager := userMocks.NewMockManager(ctrl)
+-	userManager.EXPECT().GetUser(gomock.Any()).Return(testUser).AnyTimes()
+ 
+ 	for _, test := range tests {
+ 		t.Run(test.name, func(t *testing.T) {
+ 			testSchemas := types.NewSchemas().AddSchemas(managementSchema.Schemas)
+ 			clusterSchema := testSchemas.Schema(&managementSchema.Version, v3.ClusterType)
++			cluster := v3.Cluster{
++				Name: testClusterName,
++			}
++			if test.clusterAceEnabled {
++				cluster.LocalClusterAuthEndpoint = &v3.LocalClusterAuthEndpoint{
++					Enabled: true,
++				}
++			}
+ 			fakeStore := fakeClusterStore{
+-				cluster: v3.Cluster{
+-					Name: testClusterName,
+-				},
+-				err: test.clusterLookupErr,
++				cluster: cluster,
++				err:     test.clusterLookupErr,
+ 			}
+ 			clusterSchema.Store = &fakeStore
+ 			err := settings.KubeconfigGenerateToken.Set(test.generateToken)
+@@ -107,6 +139,11 @@ func TestGenerateKubeconfigActionHandler(t *testing.T) {
+ 				},
+ 			}
+ 
++			testUserName := testUser
++			if test.tokenCreateErr {
++				testUserName = errUserName
++			}
++
+ 			handler := ActionHandler{
+ 				NodeLister: &fakes.NodeListerMock{
+ 					GetFunc: func(namespace string, name string) (*apimgmtv3.Node, error) {
+@@ -120,9 +157,18 @@ func TestGenerateKubeconfigActionHandler(t *testing.T) {
+ 				TokenMgr:  &fakeTokenManager{},
+ 				AuthToken: &fakeAuth,
+ 			}
++			
++			// Set the test user name in user manager mock
++			userManager.EXPECT().GetUser(gomock.Any()).Return(testUserName).AnyTimes()
++			
+ 			err = handler.GenerateKubeconfigActionHandler("not-used", nil, apiContext)
+ 			if test.wantErr {
+ 				assert.Error(t, err, "expected an error but did not get one")
++				if test.wantErrCode != "" {
++					apiErr, ok := err.(*httperror.APIError)
++					assert.True(t, ok, "expected httperror.APIError")
++					assert.Equal(t, test.wantErrCode, apiErr.Code, "error code mismatch")
++				}
+ 			} else {
+ 				assert.NoError(t, err, "got an error when calling generate kubeconfig")
+ 				assert.Len(t, recorder.Responses, 1, "expected a single response")
+@@ -133,7 +179,7 @@ func TestGenerateKubeconfigActionHandler(t *testing.T) {
+ 				kubeconfig, ok := data["config"].(string)
+ 				assert.True(t, ok, "no string kubeconfig in response data")
+ 				if test.generateToken == "true" {
+-					assert.Contains(t, kubeconfig, fmt.Sprintf("kubeconfig-%s:", testUser), "token expected in kubeconfig but was missing")
++					assert.Contains(t, kubeconfig, fmt.Sprintf("kubeconfig-%s:", testUserName), "token expected in kubeconfig but was missing")
+ 				}
+ 				if test.hostname == "" {
+ 					assert.Contains(t, kubeconfig, fakeHost, "expected hostname from request")
