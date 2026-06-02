@@ -203,6 +203,45 @@ func (p *ldapProvider) SearchPrincipals(searchKey, principalType string, myToken
 	return principals, nil
 }
 
+func (p *ldapProvider) SearchPrincipalsWithPagination(searchKey, principalType string, myToken accessor.TokenAccessor, page, pageSize int) ([]v3.Principal, error) {
+	var principals []v3.Principal
+	var err error
+
+	config, caPool, err := p.getLDAPConfig(p.authConfigs.ObjectClient().UnstructuredClient())
+	if err != nil {
+		if IsNotConfigured(err) {
+			return principals, err
+		}
+		logrus.Warnf("ldap search principals failed to get ldap config: %s\n", err)
+		return principals, nil
+	}
+
+	lConn, err := ldap.Connect(config, caPool)
+	if err != nil {
+		logrus.Warnf("ldap search principals failed to connect to ldap: %s\n", err)
+		return principals, nil
+	}
+	defer lConn.Close()
+
+	principals, err = p.searchPrincipalsWithPagination(searchKey, principalType, config, lConn, page, pageSize)
+	if err == nil {
+		for _, principal := range principals {
+			switch principal.PrincipalType {
+			case "user":
+				if common.SamePrincipal(myToken.GetUserPrincipal(), principal) {
+					principal.Me = true
+				}
+			case "group":
+				if p.isMemberOf(myToken.GetGroupPrincipals(), principal) {
+					principal.MemberOf = true
+				}
+			}
+		}
+	}
+
+	return principals, nil
+}
+
 func (p *ldapProvider) GetPrincipal(principalID string, token accessor.TokenAccessor) (v3.Principal, error) {
 	config, caPool, err := p.getLDAPConfig(p.authConfigs.ObjectClient().UnstructuredClient())
 	if err != nil {

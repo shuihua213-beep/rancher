@@ -631,3 +631,163 @@ func TestSearchLdapOtherLDAPErrorIsPropagated(t *testing.T) {
 	require.Error(t, err, "non-NoSuchObject LDAP errors should be propagated to the caller")
 	require.Empty(t, principals)
 }
+
+func TestSearchLdapWithPagination(t *testing.T) {
+	t.Parallel()
+
+	provider := &ldapProvider{
+		providerName: "openldap",
+		userScope:    "openldap_user",
+		groupScope:   "openldap_group",
+	}
+
+	config := &v3.LdapConfig{
+		LdapFields: v3.LdapFields{
+			ServiceAccountDistinguishedName: saDN,
+			ServiceAccountPassword:          saPassword,
+			UserObjectClass:                 userObjectClassName,
+			UserSearchBase:                  "ou=users,dc=foo,dc=bar",
+			UserLoginAttribute:              "uid",
+			UserNameAttribute:               "cn",
+			GroupObjectClass:                "groupOfNames",
+			GroupNameAttribute:              "cn",
+		},
+	}
+
+	t.Run("returns first page correctly", func(t *testing.T) {
+		t.Parallel()
+
+		allEntries := make([]*ldapv3.Entry, 0, 25)
+		for i := 0; i < 25; i++ {
+			allEntries = append(allEntries, &ldapv3.Entry{
+				DN:         fmt.Sprintf("cn=user%d,ou=users,dc=foo,dc=bar", i),
+				Attributes: []*ldapv3.EntryAttribute{{Name: ObjectClass, Values: []string{userObjectClassName}}},
+			})
+		}
+
+		ldapConn := &ldapFakes.FakeLdapConn{
+			SearchWithPagingFunc: func(searchRequest *ldapv3.SearchRequest, pagingSize uint32) (*ldapv3.SearchResult, error) {
+				return &ldapv3.SearchResult{Entries: allEntries}, nil
+			},
+		}
+
+		principals, err := provider.searchLdapWithPagination("(objectClass=inetOrgPerson)", provider.userScope, config, ldapConn, 1, 10)
+
+		require.NoError(t, err)
+		require.Len(t, principals, 10)
+		assert.Equal(t, "cn=user0,ou=users,dc=foo,dc=bar", principals[0].Name)
+		assert.Equal(t, "cn=user9,ou=users,dc=foo,dc=bar", principals[9].Name)
+	})
+
+	t.Run("returns second page correctly", func(t *testing.T) {
+		t.Parallel()
+
+		allEntries := make([]*ldapv3.Entry, 0, 25)
+		for i := 0; i < 25; i++ {
+			allEntries = append(allEntries, &ldapv3.Entry{
+				DN:         fmt.Sprintf("cn=user%d,ou=users,dc=foo,dc=bar", i),
+				Attributes: []*ldapv3.EntryAttribute{{Name: ObjectClass, Values: []string{userObjectClassName}}},
+			})
+		}
+
+		ldapConn := &ldapFakes.FakeLdapConn{
+			SearchWithPagingFunc: func(searchRequest *ldapv3.SearchRequest, pagingSize uint32) (*ldapv3.SearchResult, error) {
+				return &ldapv3.SearchResult{Entries: allEntries}, nil
+			},
+		}
+
+		principals, err := provider.searchLdapWithPagination("(objectClass=inetOrgPerson)", provider.userScope, config, ldapConn, 2, 10)
+
+		require.NoError(t, err)
+		require.Len(t, principals, 10)
+		assert.Equal(t, "cn=user10,ou=users,dc=foo,dc=bar", principals[0].Name)
+		assert.Equal(t, "cn=user19,ou=users,dc=foo,dc=bar", principals[9].Name)
+	})
+
+	t.Run("returns partial last page", func(t *testing.T) {
+		t.Parallel()
+
+		allEntries := make([]*ldapv3.Entry, 0, 25)
+		for i := 0; i < 25; i++ {
+			allEntries = append(allEntries, &ldapv3.Entry{
+				DN:         fmt.Sprintf("cn=user%d,ou=users,dc=foo,dc=bar", i),
+				Attributes: []*ldapv3.EntryAttribute{{Name: ObjectClass, Values: []string{userObjectClassName}}},
+			})
+		}
+
+		ldapConn := &ldapFakes.FakeLdapConn{
+			SearchWithPagingFunc: func(searchRequest *ldapv3.SearchRequest, pagingSize uint32) (*ldapv3.SearchResult, error) {
+				return &ldapv3.SearchResult{Entries: allEntries}, nil
+			},
+		}
+
+		principals, err := provider.searchLdapWithPagination("(objectClass=inetOrgPerson)", provider.userScope, config, ldapConn, 3, 10)
+
+		require.NoError(t, err)
+		require.Len(t, principals, 5)
+		assert.Equal(t, "cn=user20,ou=users,dc=foo,dc=bar", principals[0].Name)
+		assert.Equal(t, "cn=user24,ou=users,dc=foo,dc=bar", principals[4].Name)
+	})
+
+	t.Run("returns empty when page exceeds total", func(t *testing.T) {
+		t.Parallel()
+
+		allEntries := make([]*ldapv3.Entry, 0, 5)
+		for i := 0; i < 5; i++ {
+			allEntries = append(allEntries, &ldapv3.Entry{
+				DN:         fmt.Sprintf("cn=user%d,ou=users,dc=foo,dc=bar", i),
+				Attributes: []*ldapv3.EntryAttribute{{Name: ObjectClass, Values: []string{userObjectClassName}}},
+			})
+		}
+
+		ldapConn := &ldapFakes.FakeLdapConn{
+			SearchWithPagingFunc: func(searchRequest *ldapv3.SearchRequest, pagingSize uint32) (*ldapv3.SearchResult, error) {
+				return &ldapv3.SearchResult{Entries: allEntries}, nil
+			},
+		}
+
+		principals, err := provider.searchLdapWithPagination("(objectClass=inetOrgPerson)", provider.userScope, config, ldapConn, 2, 10)
+
+		require.NoError(t, err)
+		require.Empty(t, principals)
+	})
+
+	t.Run("returns all results when no pagination", func(t *testing.T) {
+		t.Parallel()
+
+		allEntries := make([]*ldapv3.Entry, 0, 25)
+		for i := 0; i < 25; i++ {
+			allEntries = append(allEntries, &ldapv3.Entry{
+				DN:         fmt.Sprintf("cn=user%d,ou=users,dc=foo,dc=bar", i),
+				Attributes: []*ldapv3.EntryAttribute{{Name: ObjectClass, Values: []string{userObjectClassName}}},
+			})
+		}
+
+		ldapConn := &ldapFakes.FakeLdapConn{
+			SearchWithPagingFunc: func(searchRequest *ldapv3.SearchRequest, pagingSize uint32) (*ldapv3.SearchResult, error) {
+				assert.Equal(t, uint32(1000), pagingSize, "should use default page size of 1000")
+				return &ldapv3.SearchResult{Entries: allEntries}, nil
+			},
+		}
+
+		principals, err := provider.searchLdapWithPagination("(objectClass=inetOrgPerson)", provider.userScope, config, ldapConn, 0, 0)
+
+		require.NoError(t, err)
+		require.Len(t, principals, 25)
+	})
+
+	t.Run("handles empty result set", func(t *testing.T) {
+		t.Parallel()
+
+		ldapConn := &ldapFakes.FakeLdapConn{
+			SearchWithPagingFunc: func(searchRequest *ldapv3.SearchRequest, pagingSize uint32) (*ldapv3.SearchResult, error) {
+				return &ldapv3.SearchResult{Entries: []*ldapv3.Entry{}}, nil
+			},
+		}
+
+		principals, err := provider.searchLdapWithPagination("(objectClass=inetOrgPerson)", provider.userScope, config, ldapConn, 1, 10)
+
+		require.NoError(t, err)
+		require.Empty(t, principals)
+	})
+}

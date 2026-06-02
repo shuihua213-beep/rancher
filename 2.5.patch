@@ -1,0 +1,412 @@
+diff --git a/pkg/apis/management.cattle.io/v3/authn_types.go b/pkg/apis/management.cattle.io/v3/authn_types.go
+index f75dde7f7..5aad4d730 100644
+--- a/pkg/apis/management.cattle.io/v3/authn_types.go
++++ b/pkg/apis/management.cattle.io/v3/authn_types.go
+@@ -275,6 +275,8 @@ type Principal struct {
+ type SearchPrincipalsInput struct {
+ 	Name          string `json:"name" norman:"type=string,required,notnullable"`
+ 	PrincipalType string `json:"principalType,omitempty" norman:"type=enum,options=user|group"`
++	Page          int    `json:"page,omitempty"`
++	PageSize      int    `json:"pageSize,omitempty"`
+ }
+ 
+ type ChangePasswordInput struct {
+diff --git a/pkg/auth/principals/handler.go b/pkg/auth/principals/handler.go
+index 213522ef8..1c35ec57e 100644
+--- a/pkg/auth/principals/handler.go
++++ b/pkg/auth/principals/handler.go
+@@ -51,7 +51,7 @@ func (h *principalsHandler) actions(actionName string, action *types.Action, api
+ 		return err
+ 	}
+ 
+-	ps, err := providers.SearchPrincipals(input.Name, input.PrincipalType, token)
++	ps, err := providers.SearchPrincipalsWithPagination(input.Name, input.PrincipalType, token, input.Page, input.PageSize)
+ 	if err != nil {
+ 		return err
+ 	}
+diff --git a/pkg/auth/providers/common/provider.go b/pkg/auth/providers/common/provider.go
+index 2a9320187..dcaff3397 100644
+--- a/pkg/auth/providers/common/provider.go
++++ b/pkg/auth/providers/common/provider.go
+@@ -56,3 +56,9 @@ type AuthProvider interface {
+ 	// forced. If "logout-all" is not supported by the provider do nothing and return nil.
+ 	Logout(w http.ResponseWriter, r *http.Request, token accessor.TokenAccessor) error
+ }
++
++// SearchPrincipalsPaginated is an optional interface that AuthProvider implementations
++// can use to support paginated principal searches.
++type SearchPrincipalsPaginated interface {
++	SearchPrincipalsWithPagination(name, principalType string, myToken accessor.TokenAccessor, page, pageSize int) ([]v3.Principal, error)
++}
+diff --git a/pkg/auth/providers/ldap/ldap_client.go b/pkg/auth/providers/ldap/ldap_client.go
+index ed6caea6c..cf2fe2d93 100644
+--- a/pkg/auth/providers/ldap/ldap_client.go
++++ b/pkg/auth/providers/ldap/ldap_client.go
+@@ -365,10 +365,14 @@ func (p *ldapProvider) getPrincipal(distinguishedName string, scope string, conf
+ }
+ 
+ func (p *ldapProvider) searchPrincipals(name, principalType string, config *v3.LdapConfig, lConn ldapv3.Client) ([]v3.Principal, error) {
++	return p.searchPrincipalsWithPagination(name, principalType, config, lConn, 0, 0)
++}
++
++func (p *ldapProvider) searchPrincipalsWithPagination(name, principalType string, config *v3.LdapConfig, lConn ldapv3.Client, page, pageSize int) ([]v3.Principal, error) {
+ 	var principals []v3.Principal
+ 
+ 	if principalType == "" || principalType == "user" {
+-		userPrincipals, err := p.searchUser(name, config, lConn)
++		userPrincipals, err := p.searchUserWithPagination(name, config, lConn, page, pageSize)
+ 		if err != nil {
+ 			return nil, err
+ 		}
+@@ -376,7 +380,7 @@ func (p *ldapProvider) searchPrincipals(name, principalType string, config *v3.L
+ 	}
+ 
+ 	if principalType == "" || principalType == "group" {
+-		groupPrincipals, err := p.searchGroup(name, config, lConn)
++		groupPrincipals, err := p.searchGroupWithPagination(name, config, lConn, page, pageSize)
+ 		if err != nil {
+ 			return nil, err
+ 		}
+@@ -387,6 +391,10 @@ func (p *ldapProvider) searchPrincipals(name, principalType string, config *v3.L
+ }
+ 
+ func (p *ldapProvider) searchUser(name string, config *v3.LdapConfig, lConn ldapv3.Client) ([]v3.Principal, error) {
++	return p.searchUserWithPagination(name, config, lConn, 0, 0)
++}
++
++func (p *ldapProvider) searchUserWithPagination(name string, config *v3.LdapConfig, lConn ldapv3.Client, page, pageSize int) ([]v3.Principal, error) {
+ 	if config.UserSearchFilter != "" {
+ 		// Make sure user search filter contains a valid LDAP query expression
+ 		// before interpolating it into the search filter.
+@@ -410,10 +418,14 @@ func (p *ldapProvider) searchUser(name string, config *v3.LdapConfig, lConn ldap
+ 	// and is expected to follow ldap syntax and enclosed in parentheses.
+ 	query += srchAttrs + ")" + config.UserSearchFilter + ")"
+ 	logrus.Debugf("%s searchUser query: %s", p.providerName, query)
+-	return p.searchLdap(query, p.userScope, config, lConn)
++	return p.searchLdapWithPagination(query, p.userScope, config, lConn, page, pageSize)
+ }
+ 
+ func (p *ldapProvider) searchGroup(name string, config *v3.LdapConfig, lConn ldapv3.Client) ([]v3.Principal, error) {
++	return p.searchGroupWithPagination(name, config, lConn, 0, 0)
++}
++
++func (p *ldapProvider) searchGroupWithPagination(name string, config *v3.LdapConfig, lConn ldapv3.Client, page, pageSize int) ([]v3.Principal, error) {
+ 	if config.GroupSearchFilter != "" {
+ 		// Make sure group search filter contains a valid LDAP query expression
+ 		// before interpolating it into the search filter.
+@@ -437,10 +449,14 @@ func (p *ldapProvider) searchGroup(name string, config *v3.LdapConfig, lConn lda
+ 	)
+ 
+ 	logrus.Debugf("%s searchGroup query: %s scope: %s", p.providerName, query, p.groupScope)
+-	return p.searchLdap(query, p.groupScope, config, lConn)
++	return p.searchLdapWithPagination(query, p.groupScope, config, lConn, page, pageSize)
+ }
+ 
+ func (p *ldapProvider) searchLdap(query string, scope string, config *v3.LdapConfig, lConn ldapv3.Client) ([]v3.Principal, error) {
++	return p.searchLdapWithPagination(query, scope, config, lConn, 0, 0)
++}
++
++func (p *ldapProvider) searchLdapWithPagination(query string, scope string, config *v3.LdapConfig, lConn ldapv3.Client, page, pageSize int) ([]v3.Principal, error) {
+ 	var principals []v3.Principal
+ 	var search *ldapv3.SearchRequest
+ 
+@@ -470,7 +486,12 @@ func (p *ldapProvider) searchLdap(query string, scope string, config *v3.LdapCon
+ 		return nil, fmt.Errorf("ldap: error binding service account: %w", err)
+ 	}
+ 
+-	results, err := lConn.SearchWithPaging(search, 1000)
++	var results *ldapv3.SearchResult
++	if page > 0 && pageSize > 0 {
++		results, err = p.searchWithPagingAndOffset(lConn, search, uint32(pageSize), page)
++	} else {
++		results, err = lConn.SearchWithPaging(search, 1000)
++	}
+ 	if err != nil {
+ 		ldapErr, ok := err.(*ldapv3.Error)
+ 		if ok && ldapErr.ResultCode != ldapv3.LDAPResultNoSuchObject {
+@@ -515,6 +536,29 @@ func (p *ldapProvider) searchLdap(query string, scope string, config *v3.LdapCon
+ 	return principals, nil
+ }
+ 
++func (p *ldapProvider) searchWithPagingAndOffset(lConn ldapv3.Client, search *ldapv3.SearchRequest, pageSize uint32, page int) (*ldapv3.SearchResult, error) {
++	allResults, err := lConn.SearchWithPaging(search, pageSize)
++	if err != nil {
++		return nil, err
++	}
++
++	startIndex := (page - 1) * int(pageSize)
++	if startIndex >= len(allResults.Entries) {
++		return &ldapv3.SearchResult{Entries: []*ldapv3.Entry{}}, nil
++	}
++
++	endIndex := startIndex + int(pageSize)
++	if endIndex > len(allResults.Entries) {
++		endIndex = len(allResults.Entries)
++	}
++
++	return &ldapv3.SearchResult{
++		Entries:    allResults.Entries[startIndex:endIndex],
++		Controls:   allResults.Controls,
++		Referrals:  allResults.Referrals,
++	}, nil
++}
++
+ func (p *ldapProvider) permissionCheck(attributes []*ldapv3.EntryAttribute, config *v3.LdapConfig) bool {
+ 	userObjectClass := config.UserObjectClass
+ 	userEnabledAttribute := config.UserEnabledAttribute
+diff --git a/pkg/auth/providers/ldap/ldap_client_test.go b/pkg/auth/providers/ldap/ldap_client_test.go
+index 66d92dfed..a5601743d 100644
+--- a/pkg/auth/providers/ldap/ldap_client_test.go
++++ b/pkg/auth/providers/ldap/ldap_client_test.go
+@@ -631,3 +631,163 @@ func TestSearchLdapOtherLDAPErrorIsPropagated(t *testing.T) {
+ 	require.Error(t, err, "non-NoSuchObject LDAP errors should be propagated to the caller")
+ 	require.Empty(t, principals)
+ }
++
++func TestSearchLdapWithPagination(t *testing.T) {
++	t.Parallel()
++
++	provider := &ldapProvider{
++		providerName: "openldap",
++		userScope:    "openldap_user",
++		groupScope:   "openldap_group",
++	}
++
++	config := &v3.LdapConfig{
++		LdapFields: v3.LdapFields{
++			ServiceAccountDistinguishedName: saDN,
++			ServiceAccountPassword:          saPassword,
++			UserObjectClass:                 userObjectClassName,
++			UserSearchBase:                  "ou=users,dc=foo,dc=bar",
++			UserLoginAttribute:              "uid",
++			UserNameAttribute:               "cn",
++			GroupObjectClass:                "groupOfNames",
++			GroupNameAttribute:              "cn",
++		},
++	}
++
++	t.Run("returns first page correctly", func(t *testing.T) {
++		t.Parallel()
++
++		allEntries := make([]*ldapv3.Entry, 0, 25)
++		for i := 0; i < 25; i++ {
++			allEntries = append(allEntries, &ldapv3.Entry{
++				DN:         fmt.Sprintf("cn=user%d,ou=users,dc=foo,dc=bar", i),
++				Attributes: []*ldapv3.EntryAttribute{{Name: ObjectClass, Values: []string{userObjectClassName}}},
++			})
++		}
++
++		ldapConn := &ldapFakes.FakeLdapConn{
++			SearchWithPagingFunc: func(searchRequest *ldapv3.SearchRequest, pagingSize uint32) (*ldapv3.SearchResult, error) {
++				return &ldapv3.SearchResult{Entries: allEntries}, nil
++			},
++		}
++
++		principals, err := provider.searchLdapWithPagination("(objectClass=inetOrgPerson)", provider.userScope, config, ldapConn, 1, 10)
++
++		require.NoError(t, err)
++		require.Len(t, principals, 10)
++		assert.Equal(t, "cn=user0,ou=users,dc=foo,dc=bar", principals[0].Name)
++		assert.Equal(t, "cn=user9,ou=users,dc=foo,dc=bar", principals[9].Name)
++	})
++
++	t.Run("returns second page correctly", func(t *testing.T) {
++		t.Parallel()
++
++		allEntries := make([]*ldapv3.Entry, 0, 25)
++		for i := 0; i < 25; i++ {
++			allEntries = append(allEntries, &ldapv3.Entry{
++				DN:         fmt.Sprintf("cn=user%d,ou=users,dc=foo,dc=bar", i),
++				Attributes: []*ldapv3.EntryAttribute{{Name: ObjectClass, Values: []string{userObjectClassName}}},
++			})
++		}
++
++		ldapConn := &ldapFakes.FakeLdapConn{
++			SearchWithPagingFunc: func(searchRequest *ldapv3.SearchRequest, pagingSize uint32) (*ldapv3.SearchResult, error) {
++				return &ldapv3.SearchResult{Entries: allEntries}, nil
++			},
++		}
++
++		principals, err := provider.searchLdapWithPagination("(objectClass=inetOrgPerson)", provider.userScope, config, ldapConn, 2, 10)
++
++		require.NoError(t, err)
++		require.Len(t, principals, 10)
++		assert.Equal(t, "cn=user10,ou=users,dc=foo,dc=bar", principals[0].Name)
++		assert.Equal(t, "cn=user19,ou=users,dc=foo,dc=bar", principals[9].Name)
++	})
++
++	t.Run("returns partial last page", func(t *testing.T) {
++		t.Parallel()
++
++		allEntries := make([]*ldapv3.Entry, 0, 25)
++		for i := 0; i < 25; i++ {
++			allEntries = append(allEntries, &ldapv3.Entry{
++				DN:         fmt.Sprintf("cn=user%d,ou=users,dc=foo,dc=bar", i),
++				Attributes: []*ldapv3.EntryAttribute{{Name: ObjectClass, Values: []string{userObjectClassName}}},
++			})
++		}
++
++		ldapConn := &ldapFakes.FakeLdapConn{
++			SearchWithPagingFunc: func(searchRequest *ldapv3.SearchRequest, pagingSize uint32) (*ldapv3.SearchResult, error) {
++				return &ldapv3.SearchResult{Entries: allEntries}, nil
++			},
++		}
++
++		principals, err := provider.searchLdapWithPagination("(objectClass=inetOrgPerson)", provider.userScope, config, ldapConn, 3, 10)
++
++		require.NoError(t, err)
++		require.Len(t, principals, 5)
++		assert.Equal(t, "cn=user20,ou=users,dc=foo,dc=bar", principals[0].Name)
++		assert.Equal(t, "cn=user24,ou=users,dc=foo,dc=bar", principals[4].Name)
++	})
++
++	t.Run("returns empty when page exceeds total", func(t *testing.T) {
++		t.Parallel()
++
++		allEntries := make([]*ldapv3.Entry, 0, 5)
++		for i := 0; i < 5; i++ {
++			allEntries = append(allEntries, &ldapv3.Entry{
++				DN:         fmt.Sprintf("cn=user%d,ou=users,dc=foo,dc=bar", i),
++				Attributes: []*ldapv3.EntryAttribute{{Name: ObjectClass, Values: []string{userObjectClassName}}},
++			})
++		}
++
++		ldapConn := &ldapFakes.FakeLdapConn{
++			SearchWithPagingFunc: func(searchRequest *ldapv3.SearchRequest, pagingSize uint32) (*ldapv3.SearchResult, error) {
++				return &ldapv3.SearchResult{Entries: allEntries}, nil
++			},
++		}
++
++		principals, err := provider.searchLdapWithPagination("(objectClass=inetOrgPerson)", provider.userScope, config, ldapConn, 2, 10)
++
++		require.NoError(t, err)
++		require.Empty(t, principals)
++	})
++
++	t.Run("returns all results when no pagination", func(t *testing.T) {
++		t.Parallel()
++
++		allEntries := make([]*ldapv3.Entry, 0, 25)
++		for i := 0; i < 25; i++ {
++			allEntries = append(allEntries, &ldapv3.Entry{
++				DN:         fmt.Sprintf("cn=user%d,ou=users,dc=foo,dc=bar", i),
++				Attributes: []*ldapv3.EntryAttribute{{Name: ObjectClass, Values: []string{userObjectClassName}}},
++			})
++		}
++
++		ldapConn := &ldapFakes.FakeLdapConn{
++			SearchWithPagingFunc: func(searchRequest *ldapv3.SearchRequest, pagingSize uint32) (*ldapv3.SearchResult, error) {
++				assert.Equal(t, uint32(1000), pagingSize, "should use default page size of 1000")
++				return &ldapv3.SearchResult{Entries: allEntries}, nil
++			},
++		}
++
++		principals, err := provider.searchLdapWithPagination("(objectClass=inetOrgPerson)", provider.userScope, config, ldapConn, 0, 0)
++
++		require.NoError(t, err)
++		require.Len(t, principals, 25)
++	})
++
++	t.Run("handles empty result set", func(t *testing.T) {
++		t.Parallel()
++
++		ldapConn := &ldapFakes.FakeLdapConn{
++			SearchWithPagingFunc: func(searchRequest *ldapv3.SearchRequest, pagingSize uint32) (*ldapv3.SearchResult, error) {
++				return &ldapv3.SearchResult{Entries: []*ldapv3.Entry{}}, nil
++			},
++		}
++
++		principals, err := provider.searchLdapWithPagination("(objectClass=inetOrgPerson)", provider.userScope, config, ldapConn, 1, 10)
++
++		require.NoError(t, err)
++		require.Empty(t, principals)
++	})
++}
+diff --git a/pkg/auth/providers/ldap/ldap_provider.go b/pkg/auth/providers/ldap/ldap_provider.go
+index d2e87c964..93f69d3c3 100644
+--- a/pkg/auth/providers/ldap/ldap_provider.go
++++ b/pkg/auth/providers/ldap/ldap_provider.go
+@@ -203,6 +203,45 @@ func (p *ldapProvider) SearchPrincipals(searchKey, principalType string, myToken
+ 	return principals, nil
+ }
+ 
++func (p *ldapProvider) SearchPrincipalsWithPagination(searchKey, principalType string, myToken accessor.TokenAccessor, page, pageSize int) ([]v3.Principal, error) {
++	var principals []v3.Principal
++	var err error
++
++	config, caPool, err := p.getLDAPConfig(p.authConfigs.ObjectClient().UnstructuredClient())
++	if err != nil {
++		if IsNotConfigured(err) {
++			return principals, err
++		}
++		logrus.Warnf("ldap search principals failed to get ldap config: %s\n", err)
++		return principals, nil
++	}
++
++	lConn, err := ldap.Connect(config, caPool)
++	if err != nil {
++		logrus.Warnf("ldap search principals failed to connect to ldap: %s\n", err)
++		return principals, nil
++	}
++	defer lConn.Close()
++
++	principals, err = p.searchPrincipalsWithPagination(searchKey, principalType, config, lConn, page, pageSize)
++	if err == nil {
++		for _, principal := range principals {
++			switch principal.PrincipalType {
++			case "user":
++				if common.SamePrincipal(myToken.GetUserPrincipal(), principal) {
++					principal.Me = true
++				}
++			case "group":
++				if p.isMemberOf(myToken.GetGroupPrincipals(), principal) {
++					principal.MemberOf = true
++				}
++			}
++		}
++	}
++
++	return principals, nil
++}
++
+ func (p *ldapProvider) GetPrincipal(principalID string, token accessor.TokenAccessor) (v3.Principal, error) {
+ 	config, caPool, err := p.getLDAPConfig(p.authConfigs.ObjectClient().UnstructuredClient())
+ 	if err != nil {
+diff --git a/pkg/auth/providers/providers.go b/pkg/auth/providers/providers.go
+index 69a85ee16..bca74b06d 100644
+--- a/pkg/auth/providers/providers.go
++++ b/pkg/auth/providers/providers.go
+@@ -173,6 +173,11 @@ func GetPrincipal(principalID string, myToken accessor.TokenAccessor) (apiv3.Pri
+ 
+ // SearchPrincipals searches for principals by name using the token's auth provider, appending deduplicated local results.
+ func SearchPrincipals(name, principalType string, myToken accessor.TokenAccessor) ([]apiv3.Principal, error) {
++	return SearchPrincipalsWithPagination(name, principalType, myToken, 0, 0)
++}
++
++// SearchPrincipalsWithPagination searches for principals by name with optional pagination support.
++func SearchPrincipalsWithPagination(name, principalType string, myToken accessor.TokenAccessor, page, pageSize int) ([]apiv3.Principal, error) {
+ 	ap := myToken.GetAuthProvider()
+ 	if ap == "" {
+ 		return []apiv3.Principal{}, fmt.Errorf("[SearchPrincipals] no authProvider specified in token")
+@@ -186,7 +191,20 @@ func SearchPrincipals(name, principalType string, myToken accessor.TokenAccessor
+ 	if p == nil {
+ 		return []apiv3.Principal{}, fmt.Errorf("[SearchPrincipals] authProvider %v not initialized", ap)
+ 	}
+-	principals, err := p.SearchPrincipals(name, principalType, myToken)
++
++	var principals []apiv3.Principal
++	var err error
++
++	if page > 0 && pageSize > 0 {
++		if paginatedProvider, ok := p.(common.SearchPrincipalsPaginated); ok {
++			principals, err = paginatedProvider.SearchPrincipalsWithPagination(name, principalType, myToken, page, pageSize)
++		} else {
++			principals, err = p.SearchPrincipals(name, principalType, myToken)
++		}
++	} else {
++		principals, err = p.SearchPrincipals(name, principalType, myToken)
++	}
++
+ 	if err != nil {
+ 		return principals, err
+ 	}

@@ -56,3 +56,9 @@ type AuthProvider interface {
 	// forced. If "logout-all" is not supported by the provider do nothing and return nil.
 	Logout(w http.ResponseWriter, r *http.Request, token accessor.TokenAccessor) error
 }
+
+// SearchPrincipalsPaginated is an optional interface that AuthProvider implementations
+// can use to support paginated principal searches.
+type SearchPrincipalsPaginated interface {
+	SearchPrincipalsWithPagination(name, principalType string, myToken accessor.TokenAccessor, page, pageSize int) ([]v3.Principal, error)
+}
