@@ -184,7 +184,7 @@ func (p *ldapProvider) SearchPrincipals(searchKey, principalType string, myToken
 	}
 	defer lConn.Close()
 
-	principals, err = p.searchPrincipals(searchKey, principalType, config, lConn)
+	principals, err = p.searchPrincipals(searchKey, principalType, config, lConn, 0, 0)
 	if err == nil {
 		for _, principal := range principals {
 			switch principal.PrincipalType {

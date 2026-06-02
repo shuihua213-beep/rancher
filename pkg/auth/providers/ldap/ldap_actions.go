@@ -1,13 +1,16 @@
 package ldap
 
 import (
+	"encoding/json"
 	"fmt"
+	"net/http"
 	"strings"
 
 	ldapv3 "github.com/go-ldap/ldap/v3"
 	"github.com/rancher/norman/api/handler"
 	"github.com/rancher/norman/httperror"
 	"github.com/rancher/norman/types"
+	"github.com/rancher/norman/types/convert"
 	v3 "github.com/rancher/rancher/pkg/apis/management.cattle.io/v3"
 	"github.com/rancher/rancher/pkg/auth/providers/common"
 	"github.com/rancher/rancher/pkg/auth/providers/common/ldap"
@@ -21,6 +24,7 @@ import (
 func (p *ldapProvider) formatter(apiContext *types.APIContext, resource *types.RawResource) {
 	common.AddCommonActions(apiContext, resource)
 	resource.AddAction(apiContext, "testAndApply")
+	resource.AddAction(apiContext, "search")
 }
 
 func (p *ldapProvider) actionHandler(actionName string, action *types.Action, request *types.APIContext) error {
@@ -35,6 +39,8 @@ func (p *ldapProvider) actionHandler(actionName string, action *types.Action, re
 	switch actionName {
 	case "testAndApply":
 		return p.testAndApply(request)
+	case "search":
+		return p.search(request)
 	default:
 		return httperror.NewAPIError(httperror.ActionNotAvailable, "")
 	}
@@ -170,6 +176,48 @@ func (p *ldapProvider) testAndApply(request *types.APIContext) error {
 	}
 
 	return p.tokenMGR.CreateTokenAndSetCookie(user.Name, userPrincipal, groupPrincipals, "", 0, "Token via LDAP Configuration", request)
+}
+
+type searchPrincipalsInput struct {
+	Name          string `json:"name"`
+	PrincipalType string `json:"principalType"`
+	Page          int    `json:"page"`
+	PageSize      int    `json:"pageSize"`
+}
+
+func (p *ldapProvider) search(request *types.APIContext) error {
+	var input searchPrincipalsInput
+	if err := json.NewDecoder(request.Request.Body).Decode(&input); err != nil {
+		return httperror.NewAPIError(httperror.InvalidBodyContent, fmt.Sprintf("Failed to parse body: %v", err))
+	}
+
+	config, caPool, err := p.getLDAPConfig(p.authConfigs.ObjectClient().UnstructuredClient())
+	if err != nil {
+		return err
+	}
+
+	lConn, err := ldap.Connect(config, caPool)
+	if err != nil {
+		return err
+	}
+	defer lConn.Close()
+
+	principals, err := p.searchPrincipals(input.Name, input.PrincipalType, config, lConn, input.Page, input.PageSize)
+	if err != nil {
+		return err
+	}
+
+	var result []map[string]any
+	for _, principal := range principals {
+		data, err := convert.EncodeToMap(principal)
+		if err != nil {
+			return err
+		}
+		result = append(result, data)
+	}
+
+	request.WriteResponse(http.StatusOK, result)
+	return nil
 }
 
 func (p *ldapProvider) saveLDAPConfig(config *v3.LdapConfig) error {

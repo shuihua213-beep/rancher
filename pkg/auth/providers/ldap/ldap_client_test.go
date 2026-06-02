@@ -596,7 +596,7 @@ func TestSearchLdapNoSuchObjectErrorIsIgnored(t *testing.T) {
 		},
 	}
 
-	principals, err := provider.searchLdap("(objectClass=inetOrgPerson)", provider.userScope, config, ldapConn)
+	principals, err := provider.searchLdap("(objectClass=inetOrgPerson)", provider.userScope, config, ldapConn, 0, 0)
 
 	require.NoError(t, err, "LDAPResultNoSuchObject should be treated as empty results, not an error")
 	require.Empty(t, principals)
@@ -626,8 +626,70 @@ func TestSearchLdapOtherLDAPErrorIsPropagated(t *testing.T) {
 		},
 	}
 
-	principals, err := provider.searchLdap("(objectClass=inetOrgPerson)", provider.userScope, config, ldapConn)
+	principals, err := provider.searchLdap("(objectClass=inetOrgPerson)", provider.userScope, config, ldapConn, 0, 0)
 
 	require.Error(t, err, "non-NoSuchObject LDAP errors should be propagated to the caller")
 	require.Empty(t, principals)
+}
+
+func TestSearchLdapWithPaging(t *testing.T) {
+	t.Parallel()
+
+	provider := &ldapProvider{
+		providerName: "openldap",
+		userScope:    "openldap_user",
+		groupScope:   "openldap_group",
+	}
+
+	config := &v3.LdapConfig{
+		LdapFields: v3.LdapFields{
+			ServiceAccountDistinguishedName: saDN,
+			ServiceAccountPassword:          saPassword,
+			UserObjectClass:                 userObjectClassName,
+			UserSearchBase:                  "ou=users,dc=foo,dc=bar",
+		},
+	}
+
+	callCount := 0
+	ldapConn := &ldapFakes.FakeLdapConn{
+		SearchFunc: func(searchRequest *ldapv3.SearchRequest) (*ldapv3.SearchResult, error) {
+			callCount++
+			if callCount == 1 {
+				return &ldapv3.SearchResult{
+					Entries: []*ldapv3.Entry{
+						{
+							DN: "cn=user1,ou=users,dc=foo,dc=bar",
+							Attributes: []*ldapv3.EntryAttribute{
+								{Name: ObjectClass, Values: []string{userObjectClassName}},
+							},
+						},
+					},
+					Controls: []ldapv3.Control{
+						ldapv3.NewControlPaging(1),
+					},
+				}, nil
+			}
+			return &ldapv3.SearchResult{
+				Entries: []*ldapv3.Entry{
+					{
+						DN: "cn=user2,ou=users,dc=foo,dc=bar",
+						Attributes: []*ldapv3.EntryAttribute{
+							{Name: ObjectClass, Values: []string{userObjectClassName}},
+						},
+					},
+				},
+				Controls: []ldapv3.Control{
+					// empty cookie
+				},
+			}, nil
+		},
+	}
+
+	// Request page 2, pageSize 1. It should make 2 calls.
+	principals, err := provider.searchLdap("(objectClass=inetOrgPerson)", provider.userScope, config, ldapConn, 2, 1)
+
+	require.NoError(t, err)
+	require.Len(t, principals, 1)
+	require.Equal(t, "openldap_user://cn=user2,ou=users,dc=foo,dc=bar", principals[0].ObjectMeta.Name)
+	require.Equal(t, 2, callCount)
 }
