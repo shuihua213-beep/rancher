@@ -8,6 +8,47 @@ import (
 	"github.com/rancher/rancher/pkg/auth/providers/activedirectory/guid"
 )
 
+func BenchmarkUUID(b *testing.B) {
+	g, err := guid.New([]byte("\xaf\xf6\x0e=[\x96\xe3D\x8f\xea\xb2:}:\xa6\xcb"))
+	if err != nil {
+		b.Fatal(err)
+	}
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		g.UUID()
+	}
+}
+
+func BenchmarkHex(b *testing.B) {
+	g, err := guid.New([]byte("\xaf\xf6\x0e=[\x96\xe3D\x8f\xea\xb2:}:\xa6\xcb"))
+	if err != nil {
+		b.Fatal(err)
+	}
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		g.Hex()
+	}
+}
+
+func BenchmarkEscape(b *testing.B) {
+	g, err := guid.New([]byte("\xaf\xf6\x0e=[\x96\xe3D\x8f\xea\xb2:}:\xa6\xcb"))
+	if err != nil {
+		b.Fatal(err)
+	}
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		guid.Escape(g)
+	}
+}
+
+func BenchmarkParse(b *testing.B) {
+	uuidStr := "3d0ef6af-965b-44e3-8fea-b23a7d3aa6cb"
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_, _ = guid.Parse(uuidStr)
+	}
+}
+
 func TestDecodings(t *testing.T) {
 	tt := []struct {
 		name         string

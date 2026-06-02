@@ -24,6 +24,9 @@ import (
 	"strings"
 )
 
+const hexTable = "0123456789abcdef"
+const hexTableUpper = "0123456789ABCDEF"
+
 var uuidRegex = regexp.MustCompile("(?i)^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
 
 // GUID represent the UUID in the DSP0134 spec
@@ -45,23 +48,62 @@ func (g GUID) UUID() string {
 		return ""
 	}
 
-	u := swap(g)
+	buf := make([]byte, 36)
+	var idx int
 
-	return fmt.Sprintf(
-		"%x-%x-%x-%x-%x",
-		u[:4], u[4:6], u[6:8], u[8:10], u[10:],
-	)
+	idx = appendHex(buf, idx, g[3])
+	idx = appendHex(buf, idx, g[2])
+	idx = appendHex(buf, idx, g[1])
+	idx = appendHex(buf, idx, g[0])
+	buf[idx] = '-'
+	idx++
+
+	idx = appendHex(buf, idx, g[5])
+	idx = appendHex(buf, idx, g[4])
+	buf[idx] = '-'
+	idx++
+
+	idx = appendHex(buf, idx, g[7])
+	idx = appendHex(buf, idx, g[6])
+	buf[idx] = '-'
+	idx++
+
+	idx = appendHex(buf, idx, g[8])
+	idx = appendHex(buf, idx, g[9])
+	buf[idx] = '-'
+	idx++
+
+	idx = appendHex(buf, idx, g[10])
+	idx = appendHex(buf, idx, g[11])
+	idx = appendHex(buf, idx, g[12])
+	idx = appendHex(buf, idx, g[13])
+	idx = appendHex(buf, idx, g[14])
+	idx = appendHex(buf, idx, g[15])
+
+	return string(buf)
 }
 
 // Hex returns the Hex string representation: "33 22 11 00 55 44 77 66 88 99 AA BB CC DD EE FF"
 func (g GUID) Hex() string {
-	hexesArr := hexes(g.Bytes())
-
-	for i := range hexesArr {
-		hexesArr[i] = strings.ToUpper(hexesArr[i])
+	if len(g) == 0 {
+		return ""
 	}
 
-	return strings.Join(hexesArr, " ")
+	bufLen := len(g)*3 - 1
+	buf := make([]byte, bufLen)
+	var idx int
+
+	for i, b := range g {
+		if i > 0 {
+			buf[idx] = ' '
+			idx++
+		}
+		buf[idx] = hexTableUpper[b>>4]
+		buf[idx+1] = hexTableUpper[b&0x0f]
+		idx += 2
+	}
+
+	return string(buf)
 }
 
 // New returns a GUID object
@@ -79,8 +121,14 @@ func Parse(uuid string) (GUID, error) {
 		return nil, errors.New("cannot parse UUID to objectGUID: invalid format")
 	}
 
-	uuid = strings.ReplaceAll(uuid, "-", "")
-	uuidBytes, err := hex.DecodeString(uuid)
+	compact := make([]byte, 0, 32)
+	for i := 0; i < len(uuid); i++ {
+		if uuid[i] != '-' {
+			compact = append(compact, uuid[i])
+		}
+	}
+
+	uuidBytes, err := hex.DecodeString(string(compact))
 	if err != nil {
 		return nil, fmt.Errorf("cannot decode uuid string '%s' to hex: %w", uuid, err)
 	}
@@ -93,15 +141,21 @@ func Parse(uuid string) (GUID, error) {
 // and prefixed with the '\' character. If a byte has a hex encoded string of
 // length 1 then it will be prefixed with a '0'.
 func Escape(guid GUID) string {
-	builder := strings.Builder{}
-
-	hexArray := hexes(guid.Bytes())
-	for _, hex := range hexArray {
-		builder.WriteString(`\`)
-		builder.WriteString(hex)
+	if len(guid) == 0 {
+		return ""
 	}
 
-	return builder.String()
+	buf := make([]byte, len(guid)*3)
+	var idx int
+
+	for _, b := range guid {
+		buf[idx] = '\\'
+		buf[idx+1] = hexTable[b>>4]
+		buf[idx+2] = hexTable[b&0x0f]
+		idx += 3
+	}
+
+	return string(buf)
 }
 
 // swap will return a new array with the first three "bytes blocks" reversed
@@ -118,13 +172,8 @@ func swap(u []byte) []byte {
 	}
 }
 
-// hexes returns a string array of the hex decoded values
-func hexes(bytes []byte) []string {
-	var hexes []string
-
-	for _, b := range bytes {
-		hexes = append(hexes, fmt.Sprintf("%02x", b))
-	}
-
-	return hexes
+func appendHex(buf []byte, idx int, b byte) int {
+	buf[idx] = hexTable[b>>4]
+	buf[idx+1] = hexTable[b&0x0f]
+	return idx + 2
 }
