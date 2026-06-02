@@ -631,3 +631,51 @@ func TestSearchLdapOtherLDAPErrorIsPropagated(t *testing.T) {
 	require.Error(t, err, "non-NoSuchObject LDAP errors should be propagated to the caller")
 	require.Empty(t, principals)
 }
+
+func TestPaginateLDAPPrincipals(t *testing.T) {
+	t.Parallel()
+
+	principals := []v3.Principal{
+		{ObjectMeta: metav1.ObjectMeta{Name: "u1"}},
+		{ObjectMeta: metav1.ObjectMeta{Name: "u2"}},
+		{ObjectMeta: metav1.ObjectMeta{Name: "u3"}},
+		{ObjectMeta: metav1.ObjectMeta{Name: "u4"}},
+		{ObjectMeta: metav1.ObjectMeta{Name: "u5"}},
+	}
+
+	t.Run("returns requested page", func(t *testing.T) {
+		t.Parallel()
+
+		result := paginateLDAPPrincipals(principals, 2, 2)
+
+		require.Len(t, result, 2)
+		assert.Equal(t, "u3", result[0].Name)
+		assert.Equal(t, "u4", result[1].Name)
+	})
+
+	t.Run("returns remaining records on last partial page", func(t *testing.T) {
+		t.Parallel()
+
+		result := paginateLDAPPrincipals(principals, 3, 2)
+
+		require.Len(t, result, 1)
+		assert.Equal(t, "u5", result[0].Name)
+	})
+
+	t.Run("returns empty slice when page is out of range", func(t *testing.T) {
+		t.Parallel()
+
+		result := paginateLDAPPrincipals(principals, 4, 2)
+
+		require.Empty(t, result)
+	})
+
+	t.Run("keeps legacy behavior when pagination params are missing or invalid", func(t *testing.T) {
+		t.Parallel()
+
+		assert.Equal(t, principals, paginateLDAPPrincipals(principals, 0, 2))
+		assert.Equal(t, principals, paginateLDAPPrincipals(principals, 1, 0))
+		assert.Equal(t, principals, paginateLDAPPrincipals(principals, -1, 2))
+		assert.Equal(t, principals, paginateLDAPPrincipals(principals, 1, -1))
+	})
+}

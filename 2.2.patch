@@ -1,0 +1,772 @@
+diff --git a/pkg/apis/management.cattle.io/v3/authn_types.go b/pkg/apis/management.cattle.io/v3/authn_types.go
+index f75dde7f7..547f61c32 100644
+--- a/pkg/apis/management.cattle.io/v3/authn_types.go
++++ b/pkg/apis/management.cattle.io/v3/authn_types.go
+@@ -174,7 +174,7 @@ func (u *User) IsDefaultAdmin() bool {
+ // GetEnabled returns true if the user is enabled.
+ func (u *User) GetEnabled() bool {
+ 	if u.Enabled == nil {
+-		return true // Enabled by default.
++		return true
+ 	}
+ 
+ 	return *u.Enabled
+@@ -211,13 +211,13 @@ type UserAttribute struct {
+ 	metav1.ObjectMeta `json:"metadata,omitempty"`
+ 
+ 	UserName        string
+-	GroupPrincipals map[string]Principals // the value is a []Principal, but code generator cannot handle slice as a value
++	GroupPrincipals map[string]Principals
+ 	LastRefresh     string
+ 	NeedsRefresh    bool
+-	ExtraByProvider map[string]map[string][]string // extra information for the user to print in audit logs, stored per authProvider. example: map[openldap:map[principalid:[openldap_user://uid=testuser1,ou=dev,dc=us-west-2,dc=compute,dc=internal]]]
+-	LastLogin       *metav1.Time                   `json:"lastLogin,omitempty"`
+-	DisableAfter    *metav1.Duration               `json:"disableAfter,omitempty"` // Overrides DisableInactiveUserAfter setting.
+-	DeleteAfter     *metav1.Duration               `json:"deleteAfter,omitempty"`  // Overrides DeleteInactiveUserAfter setting.
++	ExtraByProvider map[string]map[string][]string
++	LastLogin       *metav1.Time     `json:"lastLogin,omitempty"`
++	DisableAfter    *metav1.Duration `json:"disableAfter,omitempty"`
++	DeleteAfter     *metav1.Duration `json:"deleteAfter,omitempty"`
+ }
+ 
+ type Principals struct {
+@@ -275,6 +275,8 @@ type Principal struct {
+ type SearchPrincipalsInput struct {
+ 	Name          string `json:"name" norman:"type=string,required,notnullable"`
+ 	PrincipalType string `json:"principalType,omitempty" norman:"type=enum,options=user|group"`
++	Page          int    `json:"page,omitempty" norman:"type=int"`
++	PageSize      int    `json:"pageSize,omitempty" norman:"type=int"`
+ }
+ 
+ type ChangePasswordInput struct {
+@@ -300,8 +302,6 @@ type AuthConfig struct {
+ 	AccessMode          string   `json:"accessMode,omitempty" norman:"required,notnullable,type=enum,options=required|restricted|unrestricted"`
+ 	AllowedPrincipalIDs []string `json:"allowedPrincipalIds,omitempty" norman:"type=array[reference[principal]]"`
+ 
+-	// Flag. True when the auth provider supports a `Logout All` operation.
+-	// Currently only the SAML providers do, with their `Single Log Out` flow.
+ 	LogoutAllSupported bool `json:"logoutAllSupported,omitempty"`
+ 
+ 	Status AuthConfigStatus `json:"status"`
+@@ -312,22 +312,11 @@ type AuthConfigStatus struct {
+ }
+ 
+ type AuthConfigConditions struct {
+-	// Type of condition
+ 	Type condition.Cond `json:"type"`
+-
+-	// Status of condition (one of True, False, Unknown)
+ 	Status v1.ConditionStatus `json:"status"`
+-
+-	// Last time the condition was updated
+ 	LastUpdateTime string `json:"lastUpdateTime,omitempty"`
+-
+-	// Last time the condition transitioned from one status to another
+ 	LastTransitionTime string `json:"lastTransitionTime,omitempty"`
+-
+-	// The reason for the condition's last transition
+ 	Reason string `json:"reason,omitempty"`
+-
+-	// Human-readable message indicating details about last transition
+ 	Message string `json:"message,omitempty"`
+ }
+ 
+@@ -339,465 +328,9 @@ type SamlToken struct {
+ 	types.Namespaced
+ 	metav1.TypeMeta   `json:",inline"`
+ 	metav1.ObjectMeta `json:"metadata,omitempty"`
+-
+-	Token     string `json:"token" norman:"writeOnly,noupdate"`
+-	ExpiresAt string `json:"expiresAt"`
+-}
+-
+-// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
+-
+-type LocalConfig struct {
+-	AuthConfig `json:",inline" mapstructure:",squash"`
+-}
+-
+-// +genclient
+-// +kubebuilder:skipversion
+-// +genclient:nonNamespaced
+-// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
+-
+-type GithubConfig struct {
+-	AuthConfig `json:",inline" mapstructure:",squash"`
+-
+-	Hostname string `json:"hostname,omitempty" norman:"default=github.com,required"`
+-	TLS      bool   `json:"tls,omitempty" norman:"notnullable,default=true,required"`
+-
+-	ClientID     string `json:"clientId,omitempty" norman:"required"`
+-	ClientSecret string `json:"clientSecret,omitempty" norman:"required,type=password"`
+-
+-	// AdditionalClientIDs is a map of clientIDs to client secrets
+-	AdditionalClientIDs map[string]string `json:"additionalClientIds,omitempty" norman:"nocreate,noupdate"`
+-	HostnameToClientID  map[string]string `json:"hostnameToClientId,omitempty" norman:"nocreate,noupdate"`
+-}
+-
+-type GithubConfigTestOutput struct {
+-	RedirectURL string `json:"redirectUrl"`
+-}
+-
+-type GithubConfigApplyInput struct {
+-	GithubConfig GithubConfig `json:"githubConfig,omitempty"`
+-	Code         string       `json:"code,omitempty"`
+-	Enabled      bool         `json:"enabled,omitempty"`
+-}
+-
+-// +genclient
+-// +kubebuilder:skipversion
+-// +genclient:nonNamespaced
+-// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
+-//
+-// GithubAppConfig provides a combination of the GithubConfig and additional
+-// fields to configure the GitHub app for synchronization of user data.
+-type GithubAppConfig struct {
+-	AuthConfig `json:",inline" mapstructure:",squash"`
+-
+-	// Hostname is the API server for the GitHub installation.
+-	Hostname string `json:"hostname,omitempty" norman:"default=github.com,required"`
+-	TLS      bool   `json:"tls,omitempty" norman:"notnullable,default=true,required"`
+-
+-	ClientID     string `json:"clientId,omitempty" norman:"required"`
+-	ClientSecret string `json:"clientSecret,omitempty" norman:"required,type=password"`
+-
+-	// AdditionalClientIDs is a map of clientIDs to client secrets
+-	AdditionalClientIDs map[string]string `json:"additionalClientIds,omitempty" norman:"nocreate,noupdate"`
+-	HostnameToClientID  map[string]string `json:"hostnameToClientId,omitempty" norman:"nocreate,noupdate"`
+-
+-	// AppID is the GitHub App ID and is provided on the GitHub apps page.
+-	AppID string `json:"appId,omitempty" norman:"required"`
+-
+-	// The Installation ID to query (this will be bound to a specific
+-	// Organization) and without it, we query all installations for the App.
+-	InstallationID string `json:"installationId,omitempty"`
+-
+-	// PrivateKey is a PEM format private key for signing requests.
+-	PrivateKey string `json:"privateKey,omitempty" norman:"type=password,required"`
+-}
+-
+-type GithubAppConfigTestOutput struct {
+-	RedirectURL string `json:"redirectUrl"`
+-}
+-
+-type GithubAppConfigApplyInput struct {
+-	GithubConfig GithubAppConfig `json:"githubConfig,omitempty"`
+-	Code         string          `json:"code,omitempty"`
+-	Enabled      bool            `json:"enabled,omitempty"`
+-}
+-
+-// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
+-
+-type GoogleOauthConfig struct {
+-	AuthConfig `json:",inline" mapstructure:",squash"`
+-
+-	OauthCredential              string `json:"oauthCredential,omitempty" norman:"required,type=password,notnullable"`
+-	ServiceAccountCredential     string `json:"serviceAccountCredential,omitempty" norman:"required,type=password,notnullable"`
+-	AdminEmail                   string `json:"adminEmail,omitempty" norman:"required,notnullable"`
+-	Hostname                     string `json:"hostname,omitempty" norman:"required,notnullable,noupdate"`
+-	UserInfoEndpoint             string `json:"userInfoEndpoint" norman:"default=https://openidconnect.googleapis.com/v1/userinfo,required,notnullable"`
+-	NestedGroupMembershipEnabled bool   `json:"nestedGroupMembershipEnabled"    norman:"default=false"`
+-}
+-
+-type GoogleOauthConfigTestOutput struct {
+-	RedirectURL string `json:"redirectUrl"`
+-}
+-
+-type GoogleOauthConfigApplyInput struct {
+-	GoogleOauthConfig GoogleOauthConfig `json:"googleOauthConfig,omitempty"`
+-	Code              string            `json:"code,omitempty"`
+-	Enabled           bool              `json:"enabled,omitempty"`
+-}
+-
+-// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
+-
+-type AzureADConfig struct {
+-	AuthConfig `json:",inline" mapstructure:",squash"`
+-
+-	Endpoint              string `json:"endpoint,omitempty" norman:"default=https://login.microsoftonline.com/,required,notnullable"`
+-	GraphEndpoint         string `json:"graphEndpoint,omitempty" norman:"required,notnullable"`
+-	TokenEndpoint         string `json:"tokenEndpoint,omitempty" norman:"required,notnullable"`
+-	AuthEndpoint          string `json:"authEndpoint,omitempty" norman:"required,notnullable"`
+-	DeviceAuthEndpoint    string `json:"deviceAuthEndpoint,omitempty"`
+-	TenantID              string `json:"tenantId,omitempty" norman:"required,notnullable"`
+-	ApplicationID         string `json:"applicationId,omitempty" norman:"required,notnullable"`
+-	ApplicationSecret     string `json:"applicationSecret,omitempty" norman:"required,type=password"`
+-	RancherURL            string `json:"rancherUrl,omitempty" norman:"required,notnullable"`
+-	GroupMembershipFilter string `json:"groupMembershipFilter,omitempty"`
+-
+-	// EndSessionEndpoint overrides the Azure AD end_session_endpoint used for SSO logout.
+-	// If empty, defaults to {Endpoint}/{TenantID}/oauth2/v2.0/logout.
+-	EndSessionEndpoint string `json:"endSessionEndpoint,omitempty"`
+-
+-	// LogoutAllEnabled enables SSO logout (RP-Initiated Logout) for this provider.
+-	// Can be set only if AuthConfig.LogoutAllSupported is true.
+-	LogoutAllEnabled bool `json:"logoutAllEnabled,omitempty"`
+-
+-	// LogoutAllForced, when set, makes SSO logout the only accepted logout path.
+-	// Requires LogoutAllEnabled to be true.
+-	LogoutAllForced bool `json:"logoutAllForced,omitempty"`
+-}
+-
+-type AzureADConfigTestOutput struct {
+-	RedirectURL string `json:"redirectUrl"`
+-}
+-
+-type AzureADConfigApplyInput struct {
+-	Config AzureADConfig `json:"config,omitempty"`
+-	Code   string        `json:"code,omitempty"`
+-}
+-
+-// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
+-
+-type ActiveDirectoryConfig struct {
+-	AuthConfig `json:",inline" mapstructure:",squash"`
+-
+-	Servers                      []string `json:"servers,omitempty"                     norman:"type=array[string],required"`
+-	Port                         int64    `json:"port,omitempty"                        norman:"default=389"`
+-	TLS                          bool     `json:"tls,omitempty"                         norman:"default=false"`
+-	StartTLS                     bool     `json:"starttls,omitempty"                    norman:"default=false"`
+-	Certificate                  string   `json:"certificate,omitempty"`
+-	DefaultLoginDomain           string   `json:"defaultLoginDomain,omitempty"`
+-	ServiceAccountUsername       string   `json:"serviceAccountUsername,omitempty"      norman:"required"`
+-	ServiceAccountPassword       string   `json:"serviceAccountPassword,omitempty"      norman:"type=password,required"`
+-	UserDisabledBitMask          int64    `json:"userDisabledBitMask,omitempty"         norman:"default=2"`
+-	UserSearchBase               string   `json:"userSearchBase,omitempty"              norman:"required"`
+-	UserSearchAttribute          string   `json:"userSearchAttribute,omitempty"         norman:"default=sAMAccountName|sn|givenName,required"`
+-	UserSearchFilter             string   `json:"userSearchFilter,omitempty"`
+-	UserLoginAttribute           string   `json:"userLoginAttribute,omitempty"          norman:"default=sAMAccountName,required"`
+-	UserObjectClass              string   `json:"userObjectClass,omitempty"             norman:"default=person,required"`
+-	UserNameAttribute            string   `json:"userNameAttribute,omitempty"           norman:"default=name,required"`
+-	UserEnabledAttribute         string   `json:"userEnabledAttribute,omitempty"        norman:"default=userAccountControl,required"`
+-	UserLoginFilter              string   `json:"userLoginFilter,omitempty"`
+-	GroupSearchBase              string   `json:"groupSearchBase,omitempty"`
+-	GroupSearchAttribute         string   `json:"groupSearchAttribute,omitempty"        norman:"default=sAMAccountName,required"`
+-	GroupSearchFilter            string   `json:"groupSearchFilter,omitempty"`
+-	GroupObjectClass             string   `json:"groupObjectClass,omitempty"            norman:"default=group,required"`
+-	GroupNameAttribute           string   `json:"groupNameAttribute,omitempty"          norman:"default=name,required"`
+-	GroupDNAttribute             string   `json:"groupDNAttribute,omitempty"            norman:"default=distinguishedName,required"`
+-	GroupMemberUserAttribute     string   `json:"groupMemberUserAttribute,omitempty"    norman:"default=distinguishedName,required"`
+-	GroupMemberMappingAttribute  string   `json:"groupMemberMappingAttribute,omitempty" norman:"default=member,required"`
+-	ConnectionTimeout            int64    `json:"connectionTimeout,omitempty"           norman:"default=5000,notnullable,required"`
+-	NestedGroupMembershipEnabled *bool    `json:"nestedGroupMembershipEnabled,omitempty" norman:"default=false"`
+-}
+-
+-func (c *ActiveDirectoryConfig) GetUserSearchAttributes(searchAttributes ...string) []string {
+-	userSearchAttributes := []string{
+-		c.UserObjectClass,
+-		c.UserLoginAttribute,
+-		c.UserNameAttribute,
+-		c.UserEnabledAttribute,
+-	}
+-	return append(userSearchAttributes, searchAttributes...)
+-}
+-
+-func (c *ActiveDirectoryConfig) GetGroupSearchAttributes(searchAttributes ...string) []string {
+-	groupSeachAttributes := []string{
+-		c.GroupObjectClass,
+-		c.UserLoginAttribute,
+-		c.GroupNameAttribute,
+-		c.GroupSearchAttribute,
+-	}
+-	return append(groupSeachAttributes, searchAttributes...)
+-}
+-
+-type ActiveDirectoryTestAndApplyInput struct {
+-	ActiveDirectoryConfig ActiveDirectoryConfig `json:"activeDirectoryConfig,omitempty"`
+-	Username              string                `json:"username"`
+-	Password              string                `json:"password"`
+-	Enabled               bool                  `json:"enabled,omitempty"`
+-}
+-
+-type LdapFields struct {
+-	Servers                         []string `json:"servers,omitempty"                         norman:"type=array[string],notnullable,required"`
+-	Port                            int64    `json:"port,omitempty"                            norman:"default=389,notnullable,required"`
+-	TLS                             bool     `json:"tls,omitempty"                             norman:"default=false,notnullable,required"`
+-	StartTLS                        bool     `json:"starttls,omitempty"                        norman:"default=false"`
+-	Certificate                     string   `json:"certificate,omitempty"`
+-	ServiceAccountDistinguishedName string   `json:"serviceAccountDistinguishedName,omitempty" norman:"required"`
+-	ServiceAccountPassword          string   `json:"serviceAccountPassword,omitempty"          norman:"type=password,required"`
+-	UserDisabledBitMask             int64    `json:"userDisabledBitMask,omitempty"`
+-	UserSearchBase                  string   `json:"userSearchBase,omitempty"                  norman:"notnullable,required"`
+-	UserSearchAttribute             string   `json:"userSearchAttribute,omitempty"             norman:"default=uid|sn|givenName,notnullable,required"`
+-	UserSearchFilter                string   `json:"userSearchFilter,omitempty"`
+-	UserLoginAttribute              string   `json:"userLoginAttribute,omitempty"              norman:"default=uid,notnullable,required"`
+-	UserObjectClass                 string   `json:"userObjectClass,omitempty"                 norman:"default=inetOrgPerson,notnullable,required"`
+-	UserNameAttribute               string   `json:"userNameAttribute,omitempty"               norman:"default=cn,notnullable,required"`
+-	UserMemberAttribute             string   `json:"userMemberAttribute,omitempty"             norman:"default=memberOf,notnullable,required"`
+-	UserEnabledAttribute            string   `json:"userEnabledAttribute,omitempty"`
+-	UserLoginFilter                 string   `json:"userLoginFilter,omitempty"`
+-	GroupSearchBase                 string   `json:"groupSearchBase,omitempty"`
+-	GroupSearchAttribute            string   `json:"groupSearchAttribute,omitempty"            norman:"default=cn,notnullable,required"`
+-	GroupSearchFilter               string   `json:"groupSearchFilter,omitempty"`
+-	GroupObjectClass                string   `json:"groupObjectClass,omitempty"                norman:"default=groupOfNames,notnullable,required"`
+-	GroupNameAttribute              string   `json:"groupNameAttribute,omitempty"              norman:"default=cn,notnullable,required"`
+-	GroupDNAttribute                string   `json:"groupDNAttribute,omitempty"                norman:"default=entryDN,notnullable"`
+-	GroupMemberUserAttribute        string   `json:"groupMemberUserAttribute,omitempty"        norman:"default=entryDN,notnullable"`
+-	GroupMemberMappingAttribute     string   `json:"groupMemberMappingAttribute,omitempty"     norman:"default=member,notnullable,required"`
+-	ConnectionTimeout               int64    `json:"connectionTimeout,omitempty"               norman:"default=5000,notnullable,required"`
+-	NestedGroupMembershipEnabled    bool     `json:"nestedGroupMembershipEnabled"              norman:"default=false"`
+-	SearchUsingServiceAccount       bool     `json:"searchUsingServiceAccount"       norman:"default=false"`
+-}
+-
+-// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
+-
+-type LdapConfig struct {
+-	AuthConfig `json:",inline" mapstructure:",squash"`
+-	LdapFields `json:",inline" mapstructure:",squash"`
+-}
+-
+-func (c *LdapConfig) GetUserSearchAttributes(searchAttributes ...string) []string {
+-	userSearchAttributes := []string{
+-		"dn",
+-		c.UserMemberAttribute,
+-		c.UserObjectClass,
+-		c.UserLoginAttribute,
+-		c.UserNameAttribute,
+-		c.UserEnabledAttribute,
+-	}
+-	return append(userSearchAttributes, searchAttributes...)
+-}
+-
+-func (c *LdapConfig) GetGroupSearchAttributes(searchAttributes ...string) []string {
+-	groupSeachAttributes := []string{
+-		c.GroupMemberUserAttribute,
+-		c.GroupObjectClass,
+-		c.UserLoginAttribute,
+-		c.GroupNameAttribute,
+-		c.GroupSearchAttribute,
+-	}
+-	return append(groupSeachAttributes, searchAttributes...)
+-}
+-
+-type LdapTestAndApplyInput struct {
+-	LdapConfig `json:"ldapConfig,omitempty"`
+-	Username   string `json:"username"`
+-	Password   string `json:"password" norman:"type=password,required"`
+-}
+-
+-type OpenLdapConfig struct {
+-	LdapConfig `json:",inline" mapstructure:",squash"`
+-}
+-
+-type OpenLdapTestAndApplyInput struct {
+-	LdapTestAndApplyInput `json:",inline" mapstructure:",squash"`
+-}
+-
+-type FreeIpaConfig struct {
+-	LdapConfig `json:",inline" mapstructure:",squash"`
+-}
+-
+-type FreeIpaTestAndApplyInput struct {
+-	LdapTestAndApplyInput `json:",inline" mapstructure:",squash"`
+-}
+-
+-// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
+-
+-type SamlConfig struct {
+-	AuthConfig `json:",inline" mapstructure:",squash"`
+-
+-	// Flag. True when the auth provider is configured to accept a `Logout All`
+-	// operation. Can be set if and only if the provider supports `Logout All`
+-	// (see AuthConfig.LogoutAllSupported).
+-	LogoutAllEnabled bool `json:"logoutAllEnabled,omitempty"`
+-
+-	// Flag. Can be set if and only if `LogoutAllEnabled` (above) is set.
+-	// When set `Logout All` is the only kind of logout accepted. A regular
+-	// logout request will be rejected.
+-	LogoutAllForced bool `json:"logoutAllForced,omitempty"`
+-
+-	IDPMetadataContent string `json:"idpMetadataContent" norman:"required"`
+-	SpCert             string `json:"spCert"             norman:"required"`
+-	SpKey              string `json:"spKey"              norman:"required,type=password"`
+-	GroupsField        string `json:"groupsField"        norman:"required"`
+-	DisplayNameField   string `json:"displayNameField"   norman:"required"`
+-	UserNameField      string `json:"userNameField"      norman:"required"`
+-	UIDField           string `json:"uidField"           norman:"required"`
+-	RancherAPIHost     string `json:"rancherApiHost"     norman:"required"`
+-	EntityID           string `json:"entityID"`
+-}
+-
+-type SamlConfigTestInput struct {
+-	FinalRedirectURL string `json:"finalRedirectUrl"`
+-}
+-
+-type SamlConfigTestOutput struct {
+-	IdpRedirectURL string `json:"idpRedirectUrl"`
+-}
+-
+-type AuthConfigLogoutInput struct {
+-	FinalRedirectURL string `json:"finalRedirectUrl"`
+-}
+-
+-type AuthConfigLogoutOutput struct {
+-	IdpRedirectURL string `json:"idpRedirectUrl"`
+-}
+-
+-type PingConfig struct {
+-	SamlConfig `json:",inline" mapstructure:",squash"`
+-}
+-
+-type ADFSConfig struct {
+-	SamlConfig `json:",inline" mapstructure:",squash"`
+-}
+-
+-type KeyCloakConfig struct {
+-	SamlConfig `json:",inline" mapstructure:",squash"`
+-}
+-
+-type OKTAConfig struct {
+-	SamlConfig     `json:",inline" mapstructure:",squash"`
+-	OpenLdapConfig LdapFields `json:"openLdapConfig"`
+-}
+-
+-type ShibbolethConfig struct {
+-	SamlConfig     `json:",inline" mapstructure:",squash"`
+-	OpenLdapConfig LdapFields `json:"openLdapConfig"`
+-}
+-
+-type AuthSystemImages struct {
+-	KubeAPIAuth string `json:"kubeAPIAuth,omitempty"`
+-}
+-
+-// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
+-
+-type OIDCConfig struct {
+-	AuthConfig `json:",inline" mapstructure:",squash"`
+-
+-	ClientID           string `json:"clientId" norman:"required"`
+-	ClientSecret       string `json:"clientSecret,omitempty" norman:"required,type=password"`
+-	RancherURL         string `json:"rancherUrl" norman:"required,notnullable"`
+-	Issuer             string `json:"issuer" norman:"required,notnullable"`
+-	AuthEndpoint       string `json:"authEndpoint,omitempty"`
+-	TokenEndpoint      string `json:"tokenEndpoint,omitempty"`
+-	UserInfoEndpoint   string `json:"userInfoEndpoint,omitempty"`
+-	JWKSUrl            string `json:"jwksUrl,omitempty"`
+-	Certificate        string `json:"certificate,omitempty"`
+-	PrivateKey         string `json:"privateKey,omitempty" norman:"type=password"`
+-	GroupSearchEnabled *bool  `json:"groupSearchEnabled"`
+-	// Scopes is expected to be a space delimited list of scopes
+-	Scopes string `json:"scope,omitempty"`
+-	// AcrValue is expected to be string containing the required ACR value
+-	AcrValue string `json:"acrValue,omitempty"`
+-
+-	// This is provided by the OIDC Provider - it is the `end_session_uri` from
+-	// the discovery data.
+-	EndSessionEndpoint string `json:"endSessionEndpoint,omitempty"`
+-	// Flag. True when the auth provider is configured to accept a `Logout All`
+-	// operation. Can be set if and only if the provider supports `Logout All`
+-	// (see AuthConfig.LogoutAllSupported).
+-	LogoutAllEnabled bool `json:"logoutAllEnabled,omitempty"`
+-
+-	// Flag. Can be set if and only if `LogoutAllEnabled` (above) is set.
+-	// When set `Logout All` is the only kind of logout accepted. A regular
+-	// logout request will be rejected.
+-	LogoutAllForced bool `json:"logoutAllForced,omitempty"`
+-
+-	// GroupsClaim is used instead of groups
+-	GroupsClaim string `json:"groupsClaim,omitempty"`
+-
+-	// NameClaim is used instead instead of the name claim.
+-	NameClaim string `json:"nameClaim,omitempty"`
+-
+-	// EmailClaim is used instead of email
+-	EmailClaim string `json:"emailClaim,omitempty"`
+-
+-	// PKCE Method - leave empty for no PKCE or S256 for S256
+-	// verification.
+-	PKCEMethod string `json:"pkceMethod"`
+-
+-	// RancherAPIHost should be the base URL for accessing Rancher through the
+-	// web. e.g. https://rancher.example.com.
+-	RancherAPIHost string `json:"rancherApiHost"`
+-
+-	// clientAuthenticatedSearch indicates that we should search with the
+-	// client/secret rather than the user credentials if the underlying provider
+-	// supports this.
+-	ClientAuthenticatedSearch bool `json:"clientAuthenticatedSearch"`
+-}
+-
+-type OIDCTestOutput struct {
+-	RedirectURL string `json:"redirectUrl"`
+-}
+-
+-type OIDCApplyInput struct {
+-	OIDCConfig OIDCConfig `json:"oidcConfig,omitempty"`
+-	Code       string     `json:"code,omitempty"`
+-	Enabled    bool       `json:"enabled,omitempty"`
+-}
+-
+-// +genclient
+-// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
+-
+-// ClusterProxyConfig determines which downstream requests will be proxied to the downstream cluster for requests that contain service account tokens.
+-// Objects of this type are created in the namespace of the target cluster.  If no object exists, the feature will be disabled by default.
+-type ClusterProxyConfig struct {
+-	types.Namespaced  `json:",inline"`
+-	metav1.TypeMeta   `json:",inline"`
+-	metav1.ObjectMeta `json:"metadata,omitempty"`
+-
+-	// Enabled indicates whether downstream proxy requests for service account tokens is enabled.
+-	Enabled bool `json:"enabled"`
+-}
+-
+-// GenericOIDCConfig is the wrapper for the Generic OIDC provider to hold the OIDC Configuration
+-type GenericOIDCConfig struct {
+-	OIDCConfig `json:",inline" mapstructure:",squash"`
+-}
+-
+-// GenericOIDCTestOutput is the wrapper for the Generic OIDC provider to hold the OIDC test output object, which
+-// in turn holds the RedirectURL
+-type GenericOIDCTestOutput struct {
+-	OIDCTestOutput `json:",inline" mapstructure:",squash"`
+-}
+-
+-// GenericOIDCApplyInput is the wrapper for the input used to enable/activate the Generic OIDC auth provider.  It holds
+-// the configuration for the OIDC provider as well as an auth code.
+-type GenericOIDCApplyInput struct {
+-	OIDCApplyInput `json:",inline" mapstructure:",squash"`
+-}
+-
+-// KeyCloakOIDCConfig is the wrapper for the Generic OIDC provider to hold the OIDC Configuration
+-type KeyCloakOIDCConfig struct {
+-	OIDCConfig `json:",inline" mapstructure:",squash"`
+-}
+-
+-// GenericOIDCConfig is a wrapper for the AWS Cognito provider holding the OIDC Configuration
+-type CognitoConfig struct {
+-	OIDCConfig `json:",inline" mapstructure:",squash"`
++	Token             string `json:"token"`
++	RedirectTo        string `json:"redirectTo"`
++	CreatedAt         string `json:"createdAt"`
++	Expired           bool   `json:"expired"`
++	AuthProvider      string `json:"authProvider,omitempty"`
+ }
+diff --git a/pkg/auth/principals/handler.go b/pkg/auth/principals/handler.go
+index 213522ef8..77d36ec8c 100644
+--- a/pkg/auth/principals/handler.go
++++ b/pkg/auth/principals/handler.go
+@@ -51,7 +51,7 @@ func (h *principalsHandler) actions(actionName string, action *types.Action, api
+ 		return err
+ 	}
+ 
+-	ps, err := providers.SearchPrincipals(input.Name, input.PrincipalType, token)
++	ps, err := providers.SearchPrincipals(input.Name, input.PrincipalType, input.Page, input.PageSize, token)
+ 	if err != nil {
+ 		return err
+ 	}
+diff --git a/pkg/auth/providers/ldap/ldap_client.go b/pkg/auth/providers/ldap/ldap_client.go
+index ed6caea6c..557395282 100644
+--- a/pkg/auth/providers/ldap/ldap_client.go
++++ b/pkg/auth/providers/ldap/ldap_client.go
+@@ -10,6 +10,7 @@
+ 	"github.com/rancher/apiserver/pkg/apierror"
+ 	"github.com/rancher/norman/httperror"
+ 	v3 "github.com/rancher/rancher/pkg/apis/management.cattle.io/v3"
++	"github.com/rancher/rancher/pkg/auth/accessor"
+ 	"github.com/rancher/rancher/pkg/auth/providers/common"
+ 	"github.com/rancher/rancher/pkg/auth/providers/common/ldap"
+ 	"github.com/rancher/wrangler/v3/pkg/schemas/validation"
+@@ -364,6 +365,46 @@ func (p *ldapProvider) getPrincipal(distinguishedName string, scope string, conf
+ 	return principal, nil
+ }
+ 
++func (p *ldapProvider) SearchPrincipalsPaginated(searchKey, principalType string, page, pageSize int, myToken accessor.TokenAccessor) ([]v3.Principal, error) {
++	var principals []v3.Principal
++	var err error
++
++	config, caPool, err := p.getLDAPConfig(p.authConfigs.ObjectClient().UnstructuredClient())
++	if err != nil {
++		if IsNotConfigured(err) {
++			return principals, err
++		}
++		logrus.Warnf("ldap search principals failed to get ldap config: %s\n", err)
++		return principals, nil
++	}
++
++	lConn, err := ldap.Connect(config, caPool)
++	if err != nil {
++		logrus.Warnf("ldap search principals failed to connect to ldap: %s\n", err)
++		return principals, nil
++	}
++	defer lConn.Close()
++
++	principals, err = p.searchPrincipals(searchKey, principalType, config, lConn)
++	if err == nil {
++		principals = paginateLDAPPrincipals(principals, page, pageSize)
++		for i := range principals {
++			switch principals[i].PrincipalType {
++			case "user":
++				if common.SamePrincipal(myToken.GetUserPrincipal(), principals[i]) {
++					principals[i].Me = true
++				}
++			case "group":
++				if p.isMemberOf(myToken.GetGroupPrincipals(), principals[i]) {
++					principals[i].MemberOf = true
++				}
++			}
++		}
++	}
++
++	return principals, nil
++}
++
+ func (p *ldapProvider) searchPrincipals(name, principalType string, config *v3.LdapConfig, lConn ldapv3.Client) ([]v3.Principal, error) {
+ 	var principals []v3.Principal
+ 
+@@ -386,6 +427,24 @@ func (p *ldapProvider) searchPrincipals(name, principalType string, config *v3.L
+ 	return principals, nil
+ }
+ 
++func paginateLDAPPrincipals(principals []v3.Principal, page, pageSize int) []v3.Principal {
++	if page <= 0 || pageSize <= 0 {
++		return principals
++	}
++
++	start := (page - 1) * pageSize
++	if start >= len(principals) {
++		return []v3.Principal{}
++	}
++
++	end := start + pageSize
++	if end > len(principals) {
++		end = len(principals)
++	}
++
++	return principals[start:end]
++}
++
+ func (p *ldapProvider) searchUser(name string, config *v3.LdapConfig, lConn ldapv3.Client) ([]v3.Principal, error) {
+ 	if config.UserSearchFilter != "" {
+ 		// Make sure user search filter contains a valid LDAP query expression
+diff --git a/pkg/auth/providers/ldap/ldap_client_test.go b/pkg/auth/providers/ldap/ldap_client_test.go
+index 66d92dfed..bfafab71e 100644
+--- a/pkg/auth/providers/ldap/ldap_client_test.go
++++ b/pkg/auth/providers/ldap/ldap_client_test.go
+@@ -631,3 +631,51 @@ func TestSearchLdapOtherLDAPErrorIsPropagated(t *testing.T) {
+ 	require.Error(t, err, "non-NoSuchObject LDAP errors should be propagated to the caller")
+ 	require.Empty(t, principals)
+ }
++
++func TestPaginateLDAPPrincipals(t *testing.T) {
++	t.Parallel()
++
++	principals := []v3.Principal{
++		{ObjectMeta: metav1.ObjectMeta{Name: "u1"}},
++		{ObjectMeta: metav1.ObjectMeta{Name: "u2"}},
++		{ObjectMeta: metav1.ObjectMeta{Name: "u3"}},
++		{ObjectMeta: metav1.ObjectMeta{Name: "u4"}},
++		{ObjectMeta: metav1.ObjectMeta{Name: "u5"}},
++	}
++
++	t.Run("returns requested page", func(t *testing.T) {
++		t.Parallel()
++
++		result := paginateLDAPPrincipals(principals, 2, 2)
++
++		require.Len(t, result, 2)
++		assert.Equal(t, "u3", result[0].Name)
++		assert.Equal(t, "u4", result[1].Name)
++	})
++
++	t.Run("returns remaining records on last partial page", func(t *testing.T) {
++		t.Parallel()
++
++		result := paginateLDAPPrincipals(principals, 3, 2)
++
++		require.Len(t, result, 1)
++		assert.Equal(t, "u5", result[0].Name)
++	})
++
++	t.Run("returns empty slice when page is out of range", func(t *testing.T) {
++		t.Parallel()
++
++		result := paginateLDAPPrincipals(principals, 4, 2)
++
++		require.Empty(t, result)
++	})
++
++	t.Run("keeps legacy behavior when pagination params are missing or invalid", func(t *testing.T) {
++		t.Parallel()
++
++		assert.Equal(t, principals, paginateLDAPPrincipals(principals, 0, 2))
++		assert.Equal(t, principals, paginateLDAPPrincipals(principals, 1, 0))
++		assert.Equal(t, principals, paginateLDAPPrincipals(principals, -1, 2))
++		assert.Equal(t, principals, paginateLDAPPrincipals(principals, 1, -1))
++	})
++}
+diff --git a/pkg/auth/providers/providers.go b/pkg/auth/providers/providers.go
+index 69a85ee16..c2761d13f 100644
+--- a/pkg/auth/providers/providers.go
++++ b/pkg/auth/providers/providers.go
+@@ -48,6 +48,10 @@
+ 	}
+ )
+ 
++type paginatedSearchProvider interface {
++	SearchPrincipalsPaginated(name, principalType string, page, pageSize int, myToken accessor.TokenAccessor) ([]apiv3.Principal, error)
++}
++
+ // IsSAMLProviderType reports whether the given auth config type belongs to a SAML provider.
+ func IsSAMLProviderType(t string) bool {
+ 	return samlProviders[nameFromType(t)]
+@@ -172,7 +176,7 @@ func GetPrincipal(principalID string, myToken accessor.TokenAccessor) (apiv3.Pri
+ }
+ 
+ // SearchPrincipals searches for principals by name using the token's auth provider, appending deduplicated local results.
+-func SearchPrincipals(name, principalType string, myToken accessor.TokenAccessor) ([]apiv3.Principal, error) {
++func SearchPrincipals(name, principalType string, page, pageSize int, myToken accessor.TokenAccessor) ([]apiv3.Principal, error) {
+ 	ap := myToken.GetAuthProvider()
+ 	if ap == "" {
+ 		return []apiv3.Principal{}, fmt.Errorf("[SearchPrincipals] no authProvider specified in token")
+@@ -186,7 +190,21 @@ func SearchPrincipals(name, principalType string, myToken accessor.TokenAccessor
+ 	if p == nil {
+ 		return []apiv3.Principal{}, fmt.Errorf("[SearchPrincipals] authProvider %v not initialized", ap)
+ 	}
+-	principals, err := p.SearchPrincipals(name, principalType, myToken)
++
++	var (
++		principals []apiv3.Principal
++		err        error
++	)
++
++	if page > 0 && pageSize > 0 {
++		if paginatedProvider, ok := p.(paginatedSearchProvider); ok {
++			principals, err = paginatedProvider.SearchPrincipalsPaginated(name, principalType, page, pageSize, myToken)
++		} else {
++			principals, err = p.SearchPrincipals(name, principalType, myToken)
++		}
++	} else {
++		principals, err = p.SearchPrincipals(name, principalType, myToken)
++	}
+ 	if err != nil {
+ 		return principals, err
+ 	}
+@@ -257,27 +275,3 @@ func SetProviders(m map[string]common.AuthProvider) {
+ 
+ 	providers = m
+ }
+-
+-// ProviderUsesUserSecrets reports whether the named provider stores per-user secrets for token refresh.
+-func ProviderUsesUserSecrets(providerName string) bool {
+-	mu.RLock()
+-	p, ok := providers[providerName]
+-	mu.RUnlock()
+-	if ok {
+-		return p.UsesUserSecrets()
+-	}
+-
+-	return false
+-}
+-
+-// ProviderCanRefreshPrincipals reports whether the named provider supports refreshing group principals.
+-func ProviderCanRefreshPrincipals(providerName string) bool {
+-	mu.RLock()
+-	p, ok := providers[providerName]
+-	mu.RUnlock()
+-	if ok {
+-		return p.CanRefreshPrincipals()
+-	}
+-
+-	return false
+-}

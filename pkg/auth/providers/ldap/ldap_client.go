@@ -10,6 +10,7 @@ import (
 	"github.com/rancher/apiserver/pkg/apierror"
 	"github.com/rancher/norman/httperror"
 	v3 "github.com/rancher/rancher/pkg/apis/management.cattle.io/v3"
+	"github.com/rancher/rancher/pkg/auth/accessor"
 	"github.com/rancher/rancher/pkg/auth/providers/common"
 	"github.com/rancher/rancher/pkg/auth/providers/common/ldap"
 	"github.com/rancher/wrangler/v3/pkg/schemas/validation"
@@ -364,6 +365,46 @@ func (p *ldapProvider) getPrincipal(distinguishedName string, scope string, conf
 	return principal, nil
 }
 
+func (p *ldapProvider) SearchPrincipalsPaginated(searchKey, principalType string, page, pageSize int, myToken accessor.TokenAccessor) ([]v3.Principal, error) {
+	var principals []v3.Principal
+	var err error
+
+	config, caPool, err := p.getLDAPConfig(p.authConfigs.ObjectClient().UnstructuredClient())
+	if err != nil {
+		if IsNotConfigured(err) {
+			return principals, err
+		}
+		logrus.Warnf("ldap search principals failed to get ldap config: %s\n", err)
+		return principals, nil
+	}
+
+	lConn, err := ldap.Connect(config, caPool)
+	if err != nil {
+		logrus.Warnf("ldap search principals failed to connect to ldap: %s\n", err)
+		return principals, nil
+	}
+	defer lConn.Close()
+
+	principals, err = p.searchPrincipals(searchKey, principalType, config, lConn)
+	if err == nil {
+		principals = paginateLDAPPrincipals(principals, page, pageSize)
+		for i := range principals {
+			switch principals[i].PrincipalType {
+			case "user":
+				if common.SamePrincipal(myToken.GetUserPrincipal(), principals[i]) {
+					principals[i].Me = true
+				}
+			case "group":
+				if p.isMemberOf(myToken.GetGroupPrincipals(), principals[i]) {
+					principals[i].MemberOf = true
+				}
+			}
+		}
+	}
+
+	return principals, nil
+}
+
 func (p *ldapProvider) searchPrincipals(name, principalType string, config *v3.LdapConfig, lConn ldapv3.Client) ([]v3.Principal, error) {
 	var principals []v3.Principal
 
@@ -384,6 +425,24 @@ func (p *ldapProvider) searchPrincipals(name, principalType string, config *v3.L
 	}
 
 	return principals, nil
+}
+
+func paginateLDAPPrincipals(principals []v3.Principal, page, pageSize int) []v3.Principal {
+	if page <= 0 || pageSize <= 0 {
+		return principals
+	}
+
+	start := (page - 1) * pageSize
+	if start >= len(principals) {
+		return []v3.Principal{}
+	}
+
+	end := start + pageSize
+	if end > len(principals) {
+		end = len(principals)
+	}
+
+	return principals[start:end]
 }
 
 func (p *ldapProvider) searchUser(name string, config *v3.LdapConfig, lConn ldapv3.Client) ([]v3.Principal, error) {

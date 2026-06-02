@@ -51,7 +51,7 @@ func (h *principalsHandler) actions(actionName string, action *types.Action, api
 		return err
 	}
 
-	ps, err := providers.SearchPrincipals(input.Name, input.PrincipalType, token)
+	ps, err := providers.SearchPrincipals(input.Name, input.PrincipalType, input.Page, input.PageSize, token)
 	if err != nil {
 		return err
 	}

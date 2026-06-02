@@ -48,6 +48,10 @@ var (
 	}
 )
 
+type paginatedSearchProvider interface {
+	SearchPrincipalsPaginated(name, principalType string, page, pageSize int, myToken accessor.TokenAccessor) ([]apiv3.Principal, error)
+}
+
 // IsSAMLProviderType reports whether the given auth config type belongs to a SAML provider.
 func IsSAMLProviderType(t string) bool {
 	return samlProviders[nameFromType(t)]
@@ -172,7 +176,7 @@ func GetPrincipal(principalID string, myToken accessor.TokenAccessor) (apiv3.Pri
 }
 
 // SearchPrincipals searches for principals by name using the token's auth provider, appending deduplicated local results.
-func SearchPrincipals(name, principalType string, myToken accessor.TokenAccessor) ([]apiv3.Principal, error) {
+func SearchPrincipals(name, principalType string, page, pageSize int, myToken accessor.TokenAccessor) ([]apiv3.Principal, error) {
 	ap := myToken.GetAuthProvider()
 	if ap == "" {
 		return []apiv3.Principal{}, fmt.Errorf("[SearchPrincipals] no authProvider specified in token")
@@ -186,7 +190,21 @@ func SearchPrincipals(name, principalType string, myToken accessor.TokenAccessor
 	if p == nil {
 		return []apiv3.Principal{}, fmt.Errorf("[SearchPrincipals] authProvider %v not initialized", ap)
 	}
-	principals, err := p.SearchPrincipals(name, principalType, myToken)
+
+	var (
+		principals []apiv3.Principal
+		err        error
+	)
+
+	if page > 0 && pageSize > 0 {
+		if paginatedProvider, ok := p.(paginatedSearchProvider); ok {
+			principals, err = paginatedProvider.SearchPrincipalsPaginated(name, principalType, page, pageSize, myToken)
+		} else {
+			principals, err = p.SearchPrincipals(name, principalType, myToken)
+		}
+	} else {
+		principals, err = p.SearchPrincipals(name, principalType, myToken)
+	}
 	if err != nil {
 		return principals, err
 	}
@@ -256,28 +274,4 @@ func SetProviders(m map[string]common.AuthProvider) {
 	}
 
 	providers = m
-}
-
-// ProviderUsesUserSecrets reports whether the named provider stores per-user secrets for token refresh.
-func ProviderUsesUserSecrets(providerName string) bool {
-	mu.RLock()
-	p, ok := providers[providerName]
-	mu.RUnlock()
-	if ok {
-		return p.UsesUserSecrets()
-	}
-
-	return false
-}
-
-// ProviderCanRefreshPrincipals reports whether the named provider supports refreshing group principals.
-func ProviderCanRefreshPrincipals(providerName string) bool {
-	mu.RLock()
-	p, ok := providers[providerName]
-	mu.RUnlock()
-	if ok {
-		return p.CanRefreshPrincipals()
-	}
-
-	return false
 }
