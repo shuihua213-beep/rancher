@@ -7,10 +7,13 @@ import (
 	v3 "github.com/rancher/rancher/pkg/apis/management.cattle.io/v3"
 	"github.com/sirupsen/logrus"
 	"golang.org/x/sync/errgroup"
+	"golang.org/x/sync/singleflight"
 )
 
 // GroupCache is an in-memory cache of group principals.
 var GroupCache *lru.Cache
+
+var groupFetchGroup singleflight.Group
 
 type userPrincipalsClient interface {
 	GetGroup(id string) (v3.Principal, error)
@@ -49,15 +52,31 @@ func UserGroupsToPrincipals(azureClient userPrincipalsClient, groupNames []strin
 			// The SDK for Azure AD Graph returns group names as strings.
 			// The common interface that abstracts the Graph operations returns group names as strings.
 			// So Microsoft Graph groups are effectively fetched twice. But this happens only once - before the groups are added to the cache.
-			groupObj, err := azureClient.GetGroup(groupID)
+			v, err, _ := groupFetchGroup.Do(groupID, func() (interface{}, error) {
+				// Re-check the cache inside the singleflight to avoid duplicate network requests
+				// if another goroutine has just fetched and cached the group.
+				if principal, ok := GroupCache.Get(groupID); ok {
+					if p, ok := principal.(v3.Principal); ok {
+						return p, nil
+					}
+				}
+
+				groupObj, err := azureClient.GetGroup(groupID)
+				if err != nil {
+					logrus.Errorf("[AZURE_PROVIDER] Error getting group: %v", err)
+					return nil, err
+				}
+				groupObj.MemberOf = true
+
+				GroupCache.Add(groupID, groupObj)
+				return groupObj, nil
+			})
+
 			if err != nil {
-				logrus.Errorf("[AZURE_PROVIDER] Error getting group: %v", err)
 				return err
 			}
-			groupObj.MemberOf = true
-
-			GroupCache.Add(groupID, groupObj)
-			groupPrincipals[j] = groupObj
+			
+			groupPrincipals[j] = v.(v3.Principal)
 			return nil
 		})
 	}

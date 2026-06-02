@@ -1,7 +1,9 @@
 package clients
 
 import (
+	"sync"
 	"testing"
+	"time"
 
 	lru "github.com/hashicorp/golang-lru"
 	v3 "github.com/rancher/rancher/pkg/apis/management.cattle.io/v3"
@@ -36,11 +38,52 @@ func TestUserGroupsToPrincipals(t *testing.T) {
 	assert.Equal(t, want, principals)
 }
 
+func TestUserGroupsToPrincipals_Concurrency(t *testing.T) {
+	setupTestCache(t)
+	testGUID := "0f8fad5b-d9cb-469f-a165-70867728950e"
+
+	fc := &fakePrincipalsClient{
+		groups: map[string]fakeGroup{
+			testGUID: {id: ptr.To(testGUID)},
+		},
+		delay: 50 * time.Millisecond,
+	}
+
+	var wg sync.WaitGroup
+	numWorkers := 10
+	wg.Add(numWorkers)
+
+	for i := 0; i < numWorkers; i++ {
+		go func() {
+			defer wg.Done()
+			principals, err := UserGroupsToPrincipals(fc, []string{testGUID})
+			require.NoError(t, err)
+			require.Len(t, principals, 1)
+			assert.Equal(t, "azuread_group://"+testGUID, principals[0].Name)
+		}()
+	}
+
+	wg.Wait()
+
+	// Should only be called once due to singleflight
+	assert.Equal(t, 1, fc.callCount, "expected GetGroup to be called exactly once")
+}
+
 type fakePrincipalsClient struct {
-	groups map[string]fakeGroup
+	groups    map[string]fakeGroup
+	callCount int
+	mu        sync.Mutex
+	delay     time.Duration
 }
 
 func (f *fakePrincipalsClient) GetGroup(id string) (v3.Principal, error) {
+	f.mu.Lock()
+	f.callCount++
+	f.mu.Unlock()
+	
+	if f.delay > 0 {
+		time.Sleep(f.delay)
+	}
 	return groupToPrincipal(f.groups[id]), nil
 }
 
