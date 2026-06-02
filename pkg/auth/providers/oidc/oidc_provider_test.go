@@ -1165,3 +1165,223 @@ func TestGetOIDCRedirectionURL(t *testing.T) {
 		})
 	}
 }
+
+func TestGetOIDCProviderInvalidIssuer(t *testing.T) {
+	const providerName = "keycloak"
+	ctrl := gomock.NewController(t)
+
+	tests := []struct {
+		name   string
+		config func(port string) *apiv3.OIDCConfig
+	}{
+		{
+			name: "empty issuer URL",
+			config: func(port string) *apiv3.OIDCConfig {
+				cfg := newOIDCConfig(port)
+				cfg.Issuer = ""
+				cfg.AuthEndpoint = ""
+				cfg.TokenEndpoint = ""
+				cfg.JWKSUrl = ""
+				cfg.UserInfoEndpoint = ""
+				return cfg
+			},
+		},
+		{
+			name: "invalid issuer URL format",
+			config: func(port string) *apiv3.OIDCConfig {
+				cfg := newOIDCConfig(port)
+				cfg.Issuer = "://invalid-url"
+				cfg.AuthEndpoint = ""
+				cfg.TokenEndpoint = ""
+				cfg.JWKSUrl = ""
+				cfg.UserInfoEndpoint = ""
+				return cfg
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			listener, err := net.Listen("tcp", ":0")
+			assert.NoError(t, err)
+			port := strconv.Itoa(listener.Addr().(*net.TCPAddr).Port)
+			oidcResp := newOIDCResponses(nil, port)
+			server := mockOIDCServer(listener, oidcResp)
+			defer server.Shutdown(context.TODO())
+
+			o := OpenIDCProvider{
+				Name: providerName,
+			}
+			_, err = o.getOIDCProvider(context.TODO(), test.config(port))
+			assert.Error(t, err)
+		})
+	}
+}
+
+func TestGetUserInfoFromAuthCodeMissingUserInfo(t *testing.T) {
+	const providerName = "keycloak"
+	const userId = "user"
+	ctrl := gomock.NewController(t)
+	privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		assert.NoError(t, err)
+	}
+
+	tests := []struct {
+		name                string
+		config              func(port string) *apiv3.OIDCConfig
+		oidcProviderResponses func(port string) oidcResponses
+		expectedErrorMessage string
+	}{
+		{
+			name: "user info endpoint returns empty response",
+			config: func(port string) *apiv3.OIDCConfig {
+				return newOIDCConfig(port)
+			},
+			oidcProviderResponses: func(port string) oidcResponses {
+				resp := newOIDCResponses(privateKey, port)
+				resp.user = ""
+				return resp
+			},
+			expectedErrorMessage: "oidc: failed to decode userinfo",
+		},
+		{
+			name: "user info endpoint returns 404",
+			config: func(port string) *apiv3.OIDCConfig {
+				return newOIDCConfig(port)
+			},
+			oidcProviderResponses: func(port string) oidcResponses {
+				resp := newOIDCResponses(privateKey, port)
+				resp.user = ""
+				return resp
+			},
+			expectedErrorMessage: "",
+		},
+	}
+
+	for name, test := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			listener, err := net.Listen("tcp", ":0")
+			assert.NoError(t, err)
+			port := strconv.Itoa(listener.Addr().(*net.TCPAddr).Port)
+			oidcResp := test.oidcProviderResponses(port)
+			server := mockOIDCServer(listener, oidcResp)
+			defer server.Shutdown(context.TODO())
+			o := OpenIDCProvider{
+				Name:     providerName,
+				TokenMgr: mocks.NewMocktokenManager(ctrl),
+			}
+			claimInfo := &ClaimInfo{}
+
+			rw := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodGet, "https://localhost:"+port, nil)
+			_, _, _, err = o.getUserInfoFromAuthCode(rw, req, test.config(port), "", claimInfo, userId)
+			assert.Error(t, err)
+			if test.expectedErrorMessage != "" {
+				assert.ErrorContains(t, err, test.expectedErrorMessage)
+			}
+		})
+	}
+}
+
+func TestGetUserInfoFromAuthCodeMissingClaims(t *testing.T) {
+	const providerName = "keycloak"
+	const userId = "user"
+	ctrl := gomock.NewController(t)
+	privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		assert.NoError(t, err)
+	}
+
+	tests := []struct {
+		name                string
+		config              func(port string) *apiv3.OIDCConfig
+		oidcProviderResponses func(port string) oidcResponses
+		expectedErrorMessage string
+	}{
+		{
+			name: "token without subject claim",
+			config: func(port string) *apiv3.OIDCConfig {
+				return newOIDCConfig(port)
+			},
+			oidcProviderResponses: func(port string) oidcResponses {
+				resp := newOIDCResponses(privateKey, port)
+				tokenJWT := jwt.New(jwt.SigningMethodRS256)
+				tokenJWT.Claims = jwt.MapClaims{
+					"aud": "test",
+					"exp": time.Now().Add(5 * time.Minute).Unix(),
+					"iss": "http://localhost:" + port,
+					// No sub claim
+				}
+				tokenStr, err := tokenJWT.SignedString(privateKey)
+				assert.NoError(t, err)
+
+				token := &Token{
+					Token: oauth2.Token{
+						AccessToken:  tokenStr,
+						Expiry:       time.Now().Add(5 * time.Minute),
+						RefreshToken: tokenStr,
+					},
+					IDToken: tokenStr,
+				}
+				resp.token = token
+				return resp
+			},
+			expectedErrorMessage: "oidc: malformed jwt",
+		},
+		{
+			name: "token without issuer claim",
+			config: func(port string) *apiv3.OIDCConfig {
+				return newOIDCConfig(port)
+			},
+			oidcProviderResponses: func(port string) oidcResponses {
+				resp := newOIDCResponses(privateKey, port)
+				tokenJWT := jwt.New(jwt.SigningMethodRS256)
+				tokenJWT.Claims = jwt.MapClaims{
+					"aud": "test",
+					"exp": time.Now().Add(5 * time.Minute).Unix(),
+					"sub": "test-subject",
+					// No iss claim
+				}
+				tokenStr, err := tokenJWT.SignedString(privateKey)
+				assert.NoError(t, err)
+
+				token := &Token{
+					Token: oauth2.Token{
+						AccessToken:  tokenStr,
+						Expiry:       time.Now().Add(5 * time.Minute),
+						RefreshToken: tokenStr,
+					},
+					IDToken: tokenStr,
+				}
+				resp.token = token
+				return resp
+			},
+			expectedErrorMessage: "oidc: malformed jwt",
+		},
+	}
+
+	for name, test := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			listener, err := net.Listen("tcp", ":0")
+			assert.NoError(t, err)
+			port := strconv.Itoa(listener.Addr().(*net.TCPAddr).Port)
+			oidcResp := test.oidcProviderResponses(port)
+			server := mockOIDCServer(listener, oidcResp)
+			defer server.Shutdown(context.TODO())
+			o := OpenIDCProvider{
+				Name:     providerName,
+				TokenMgr: mocks.NewMocktokenManager(ctrl),
+			}
+			claimInfo := &ClaimInfo{}
+
+			rw := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodGet, "https://localhost:"+port, nil)
+			_, _, _, err = o.getUserInfoFromAuthCode(rw, req, test.config(port), "", claimInfo, userId)
+			assert.Error(t, err)
+		})
+	}
+}
