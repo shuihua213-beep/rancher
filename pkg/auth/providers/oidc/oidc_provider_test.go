@@ -232,6 +232,120 @@ func TestGetUserInfoFromAuthCode(t *testing.T) {
 			},
 			expectedErrorMessage: "oidc: malformed jwt",
 		},
+		"error - invalid issuer": {
+			config: func(port string) *apiv3.OIDCConfig {
+				return newOIDCConfig(port)
+			},
+			tokenManagerMock: func(token *Token) tokenManager {
+				return mocks.NewMocktokenManager(ctrl)
+			},
+			oidcProviderResponses: func(port string) oidcResponses {
+				resp := newOIDCResponses(privateKey, port)
+				// Make the token have an invalid issuer
+				tokenJWT := jwt.New(jwt.SigningMethodRS256)
+				tokenJWT.Claims = jwt.RegisteredClaims{
+					Audience:  []string{"test"},
+					ExpiresAt: jwt.NewNumericDate(time.Now().Add(5 * time.Minute)),
+					Issuer:    "http://invalid-issuer",
+				}
+				tokenStr, _ := tokenJWT.SignedString(privateKey)
+				resp.token.IDToken = tokenStr
+				resp.token.AccessToken = tokenStr
+				return resp
+			},
+			expectedErrorMessage: "oidc: id token issued by a different provider",
+		},
+		"error - missing user info": {
+			config: func(port string) *apiv3.OIDCConfig {
+				return newOIDCConfig(port)
+			},
+			tokenManagerMock: func(token *Token) tokenManager {
+				mock := mocks.NewMocktokenManager(ctrl)
+				mock.EXPECT().UpdateSecret(userId, providerName, EqToken(token.IDToken))
+				return mock
+			},
+			oidcProviderResponses: func(port string) oidcResponses {
+				resp := newOIDCResponses(privateKey, port)
+				resp.user = "" // Missing user info
+				return resp
+			},
+			expectedErrorMessage: "oidc: failed to decode userinfo: unexpected end of JSON input",
+		},
+		"error - missing critical claim": {
+			config: func(port string) *apiv3.OIDCConfig {
+				return newOIDCConfig(port)
+			},
+			tokenManagerMock: func(token *Token) tokenManager {
+				return mocks.NewMocktokenManager(ctrl)
+			},
+			oidcProviderResponses: func(port string) oidcResponses {
+				resp := newOIDCResponses(privateKey, port)
+				// Missing sub claim
+				tokenJWT := jwt.New(jwt.SigningMethodRS256)
+				tokenJWT.Claims = jwt.MapClaims{
+					"aud": "test",
+					"exp": time.Now().Add(5 * time.Minute).Unix(),
+					"iss": "http://localhost:" + port,
+				}
+				tokenStr, _ := tokenJWT.SignedString(privateKey)
+				resp.token.IDToken = tokenStr
+				resp.token.AccessToken = tokenStr
+				return resp
+			},
+			expectedErrorMessage: "oidc: missing sub claim",
+		},
+		"error - invalid issuer": {
+			config: func(port string) *apiv3.OIDCConfig {
+				return newOIDCConfig(port)
+			},
+			storedToken: func(port string) *oauth2.Token {
+				token := jwt.New(jwt.SigningMethodRS256)
+				token.Claims = jwt.RegisteredClaims{
+					Audience:  []string{"test"},
+					ExpiresAt: jwt.NewNumericDate(time.Now().Add(5 * time.Minute)),
+					Issuer:    "http://invalid-issuer",
+				}
+				tokenStr, _ := token.SignedString(privateKey)
+				return &oauth2.Token{
+					AccessToken: tokenStr,
+					Expiry:      time.Now().Add(5 * time.Minute),
+				}
+			},
+			oidcProviderResponses: func(port string) oidcResponses {
+				return newOIDCResponses(privateKey, port)
+			},
+			tokenManagerMock: func(_ *Token) tokenManager {
+				return mocks.NewMocktokenManager(ctrl)
+			},
+			expectedClaimInfo:    nil,
+			expectedErrorMessage: "oidc: id token issued by a different provider",
+		},
+		"error - missing critical claim": {
+			config: func(port string) *apiv3.OIDCConfig {
+				return newOIDCConfig(port)
+			},
+			storedToken: func(port string) *oauth2.Token {
+				token := jwt.New(jwt.SigningMethodRS256)
+				token.Claims = jwt.MapClaims{
+					"aud": "test",
+					"exp": time.Now().Add(5 * time.Minute).Unix(),
+					"iss": "http://localhost:" + port,
+				}
+				tokenStr, _ := token.SignedString(privateKey)
+				return &oauth2.Token{
+					AccessToken: tokenStr,
+					Expiry:      time.Now().Add(5 * time.Minute),
+				}
+			},
+			oidcProviderResponses: func(port string) oidcResponses {
+				return newOIDCResponses(privateKey, port)
+			},
+			tokenManagerMock: func(_ *Token) tokenManager {
+				return mocks.NewMocktokenManager(ctrl)
+			},
+			expectedClaimInfo:    nil,
+			expectedErrorMessage: "oidc: missing sub claim",
+		},
 		"error - invalid user response": {
 			config: func(port string) *apiv3.OIDCConfig {
 				return newOIDCConfig(port)
