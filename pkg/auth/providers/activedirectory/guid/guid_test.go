@@ -46,8 +46,6 @@ func TestDecodings(t *testing.T) {
 			expectedErr: "invalid length",
 		},
 		{
-			// This test data was taken from the following MS example:
-			// https://learn.microsoft.com/en-us/dotnet/api/system.guid.tobytearray?view=net-8.0
 			name:         "Microsoft GUID",
 			encoded:      []byte("\xC9\x8B\x91\x35\x6D\x19\xEA\x40\x97\x79\x88\x9D\x79\xB7\x53\xF0"),
 			expectedUUID: "35918bc9-196d-40ea-9779-889d79b753f0",
@@ -176,4 +174,122 @@ func TestEscape(t *testing.T) {
 			assert.Equal(t, tc.escapedGUID, escaped)
 		})
 	}
+}
+
+func TestString(t *testing.T) {
+	g, err := guid.New([]byte("\xaf\xf6\x0e=[\x96\xe3D\x8f\xea\xb2:}:\xa6\xcb"))
+	assert.Nil(t, err)
+	assert.Equal(t, "3d0ef6af-965b-44e3-8fea-b23a7d3aa6cb", g.String())
+}
+
+func TestBytes(t *testing.T) {
+	raw := []byte("\xaf\xf6\x0e=[\x96\xe3D\x8f\xea\xb2:}:\xa6\xcb")
+	g, err := guid.New(raw)
+	assert.Nil(t, err)
+	assert.Equal(t, raw, g.Bytes())
+}
+
+func TestRoundTrip(t *testing.T) {
+	uuids := []string{
+		"3d0ef6af-965b-44e3-8fea-b23a7d3aa6cb",
+		"75593fbf-57d1-4c55-872d-9372ef0fdd15",
+		"9b21f436-8af9-4854-953d-c6369990e0a0",
+		"4e4e4e4e-4e4e-4e4e-4e4e-4e4e4e4e4e4e",
+		"35918bc9-196d-40ea-9779-889d79b753f0",
+		"00000000-0000-0000-0000-000000000000",
+		"ffffffff-ffff-ffff-ffff-ffffffffffff",
+	}
+	for _, original := range uuids {
+		t.Run(original, func(t *testing.T) {
+			g, err := guid.Parse(original)
+			assert.Nil(t, err)
+			result := g.UUID()
+			assert.Equal(t, original, result)
+		})
+	}
+}
+
+func TestParseUppercase(t *testing.T) {
+	g, err := guid.Parse("3D0EF6AF-965B-44E3-8FEA-B23A7D3AA6CB")
+	assert.Nil(t, err)
+	assert.Equal(t, "3d0ef6af-965b-44e3-8fea-b23a7d3aa6cb", g.UUID())
+}
+
+func TestUUIDInvalidLength(t *testing.T) {
+	g := guid.GUID([]byte{0x01, 0x02, 0x03})
+	assert.Equal(t, "", g.UUID())
+}
+
+func TestHexEmpty(t *testing.T) {
+	assert.Equal(t, "", guid.GUID(nil).Hex())
+	assert.Equal(t, "", guid.GUID([]byte{}).Hex())
+}
+
+func TestHexSingleByte(t *testing.T) {
+	assert.Equal(t, "AB", guid.GUID([]byte{0xAB}).Hex())
+}
+
+func TestEscapeEmpty(t *testing.T) {
+	assert.Equal(t, "", guid.Escape(nil))
+	assert.Equal(t, "", guid.Escape(guid.GUID([]byte{})))
+}
+
+var benchGUID guid.GUID
+
+func BenchmarkUUID(b *testing.B) {
+	g, _ := guid.New([]byte("\xaf\xf6\x0e=[\x96\xe3D\x8f\xea\xb2:}:\xa6\xcb"))
+	b.ReportAllocs()
+	b.ResetTimer()
+	var s string
+	for i := 0; i < b.N; i++ {
+		s = g.UUID()
+	}
+	_ = s
+}
+
+func BenchmarkHex(b *testing.B) {
+	g, _ := guid.New([]byte("\xaf\xf6\x0e=[\x96\xe3D\x8f\xea\xb2:}:\xa6\xcb"))
+	b.ReportAllocs()
+	b.ResetTimer()
+	var s string
+	for i := 0; i < b.N; i++ {
+		s = g.Hex()
+	}
+	_ = s
+}
+
+func BenchmarkParse(b *testing.B) {
+	b.ReportAllocs()
+	b.ResetTimer()
+	var g guid.GUID
+	var err error
+	for i := 0; i < b.N; i++ {
+		g, err = guid.Parse("3d0ef6af-965b-44e3-8fea-b23a7d3aa6cb")
+	}
+	_ = g
+	_ = err
+}
+
+func BenchmarkEscape(b *testing.B) {
+	g, _ := guid.New([]byte("\xaf\xf6\x0e=[\x96\xe3D\x8f\xea\xb2:}:\xa6\xcb"))
+	b.ReportAllocs()
+	b.ResetTimer()
+	var s string
+	for i := 0; i < b.N; i++ {
+		s = guid.Escape(g)
+	}
+	_ = s
+}
+
+func BenchmarkNew(b *testing.B) {
+	raw := []byte("\xaf\xf6\x0e=[\x96\xe3D\x8f\xea\xb2:}:\xa6\xcb")
+	b.ReportAllocs()
+	b.ResetTimer()
+	var g guid.GUID
+	var err error
+	for i := 0; i < b.N; i++ {
+		g, err = guid.New(raw)
+	}
+	_ = g
+	_ = err
 }
