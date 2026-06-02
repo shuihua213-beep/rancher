@@ -14,6 +14,11 @@ import (
 	"k8s.io/apimachinery/pkg/labels"
 )
 
+var (
+	forTokenBased        = kubeconfig.ForTokenBased
+	forClusterTokenBased = kubeconfig.ForClusterTokenBased
+)
+
 func (a ActionHandler) GenerateKubeconfigActionHandler(actionName string, action *types.Action, apiContext *types.APIContext) error {
 	var err error
 	var cluster mgmtclient.Cluster
@@ -61,12 +66,12 @@ func (a ActionHandler) GenerateKubeconfigActionHandler(actionName string, action
 	}
 
 	if endpointEnabled {
-		cfg, err = kubeconfig.ForClusterTokenBased(&cluster, nodes, apiContext.ID, host, tokenKey)
+		cfg, err = forClusterTokenBased(&cluster, nodes, apiContext.ID, host, tokenKey)
 		if err != nil {
 			return err
 		}
 	} else {
-		cfg, err = kubeconfig.ForTokenBased(cluster.Name, apiContext.ID, host, tokenKey)
+		cfg, err = forTokenBased(cluster.Name, apiContext.ID, host, tokenKey)
 		if err != nil {
 			return err
 		}
