@@ -1,0 +1,266 @@
+diff --git a/pkg/auth/providers/genericoidc/genericoidc_provider_test.go b/pkg/auth/providers/genericoidc/genericoidc_provider_test.go
+index 18506cd11..c03ede90d 100644
+--- a/pkg/auth/providers/genericoidc/genericoidc_provider_test.go
++++ b/pkg/auth/providers/genericoidc/genericoidc_provider_test.go
+@@ -97,6 +97,70 @@ func TestGenOIDCProvider_GetPrincipal(t *testing.T) {
+ 			want:        apiv3.Principal{},
+ 			wantErr:     true,
+ 		},
++		{
++			name:        "invalid principal format - missing :// separator",
++			principalID: "genericoidc_user1234567",
++			want:        apiv3.Principal{},
++			wantErr:     true,
++		},
++		{
++			name:        "invalid principal format - missing underscore separator",
++			principalID: "genericoidc://user123",
++			want:        apiv3.Principal{},
++			wantErr:     true,
++		},
++		{
++			name:        "invalid principal type - not user or group",
++			principalID: "genericoidc_invalid://123456",
++			want:        apiv3.Principal{},
++			wantErr:     true,
++		},
++		{
++			name:        "empty external id but valid type",
++			principalID: "genericoidc_user://",
++			want: apiv3.Principal{
++				TypeMeta: metav1.TypeMeta{},
++				ObjectMeta: metav1.ObjectMeta{
++					Name: "genericoidc_user://",
++				},
++				DisplayName:   "",
++				LoginName:     "",
++				PrincipalType: "user",
++				Me:            false,
++				Provider:      Name,
++			},
++			wantErr: false,
++		},
++		{
++			name:        "fetch group principal with nil token",
++			principalID: "genericoidc_group://engineering-team",
++			want: apiv3.Principal{
++				TypeMeta: metav1.TypeMeta{},
++				ObjectMeta: metav1.ObjectMeta{
++					Name: "genericoidc_group://engineering-team",
++				},
++				DisplayName:   "engineering-team",
++				PrincipalType: "group",
++				Me:            false,
++				Provider:      Name,
++			},
++			wantErr: false,
++		},
++		{
++			name:        "fetch group principal with empty group name",
++			principalID: "genericoidc_group://",
++			want: apiv3.Principal{
++				TypeMeta: metav1.TypeMeta{},
++				ObjectMeta: metav1.ObjectMeta{
++					Name: "genericoidc_group://",
++				},
++				DisplayName:   "",
++				PrincipalType: "group",
++				Me:            false,
++				Provider:      Name,
++			},
++			wantErr: false,
++		},
+ 	}
+ 	for _, test := range tests {
+ 		test := test
+@@ -178,6 +242,70 @@ func TestGenOIDCProvider_GetPrincipalExt(t *testing.T) {
+ 			want:        apiv3.Principal{},
+ 			wantErr:     true,
+ 		},
++		{
++			name:        "invalid principal format - missing :// separator",
++			principalID: "genericoidc_user1234567",
++			want:        apiv3.Principal{},
++			wantErr:     true,
++		},
++		{
++			name:        "invalid principal format - missing underscore separator",
++			principalID: "genericoidc://user123",
++			want:        apiv3.Principal{},
++			wantErr:     true,
++		},
++		{
++			name:        "invalid principal type - not user or group",
++			principalID: "genericoidc_invalid://123456",
++			want:        apiv3.Principal{},
++			wantErr:     true,
++		},
++		{
++			name:        "empty external id but valid type",
++			principalID: "genericoidc_user://",
++			want: apiv3.Principal{
++				TypeMeta: metav1.TypeMeta{},
++				ObjectMeta: metav1.ObjectMeta{
++					Name: "genericoidc_user://",
++				},
++				DisplayName:   "",
++				LoginName:     "",
++				PrincipalType: "user",
++				Provider:      Name,
++				Me:            false,
++			},
++			wantErr: false,
++		},
++		{
++			name:        "fetch group principal with nil token",
++			principalID: "genericoidc_group://engineering-team",
++			want: apiv3.Principal{
++				TypeMeta: metav1.TypeMeta{},
++				ObjectMeta: metav1.ObjectMeta{
++					Name: "genericoidc_group://engineering-team",
++				},
++				DisplayName:   "engineering-team",
++				PrincipalType: "group",
++				Me:            false,
++				Provider:      Name,
++			},
++			wantErr: false,
++		},
++		{
++			name:        "fetch group principal with empty group name",
++			principalID: "genericoidc_group://",
++			want: apiv3.Principal{
++				TypeMeta: metav1.TypeMeta{},
++				ObjectMeta: metav1.ObjectMeta{
++					Name: "genericoidc_group://",
++				},
++				DisplayName:   "",
++				PrincipalType: "group",
++				Me:            false,
++				Provider:      Name,
++			},
++			wantErr: false,
++		},
+ 	}
+ 	for _, test := range tests {
+ 		test := test
+@@ -318,6 +446,7 @@ func TestGenOIDCProvider_TransformToAuthProvider(t *testing.T) {
+ 		name       string
+ 		authConfig map[string]any
+ 		expected   map[string]any
++		wantErr    bool
+ 	}{
+ 		{
+ 			name: "Test with valid authConfig",
+@@ -337,6 +466,7 @@ func TestGenOIDCProvider_TransformToAuthProvider(t *testing.T) {
+ 				"logoutAllEnabled":   false,
+ 				"logoutAllForced":    false,
+ 			},
++			wantErr: false,
+ 		},
+ 		{
+ 			name: "When configuration has acrValue",
+@@ -357,6 +487,88 @@ func TestGenOIDCProvider_TransformToAuthProvider(t *testing.T) {
+ 				"logoutAllEnabled":   false,
+ 				"logoutAllForced":    false,
+ 			},
++			wantErr: false,
++		},
++		{
++			name: "missing both authEndpoint and issuer - should return error",
++			authConfig: map[string]any{
++				"metadata":   map[string]any{"name": "genericoidc"},
++				"clientId":   "client123",
++				"rancherUrl": "https://example.com/callback",
++				"scope":      "openid profile email",
++			},
++			expected: nil,
++			wantErr:  true,
++		},
++		{
++			name: "invalid issuer URL format when discovery needed - should return error",
++			authConfig: map[string]any{
++				"metadata":   map[string]any{"name": "genericoidc"},
++				"clientId":   "client123",
++				"rancherUrl": "https://example.com/callback",
++				"scope":      "openid profile email",
++				"issuer":     "://invalid-url",
++			},
++			expected: nil,
++			wantErr:  true,
++		},
++		{
++			name: "missing clientId - should still work but redirect URL will be incomplete",
++			authConfig: map[string]any{
++				"metadata":     map[string]any{"name": "genericoidc"},
++				"rancherUrl":   "https://example.com/callback",
++				"scope":        "openid profile email",
++				"issuer":       "https://ranchertest.io/issuer",
++				"authEndpoint": "https://ranchertest.io/auth",
++			},
++			expected: map[string]any{
++				"id":                 "genericoidc",
++				"redirectUrl":        "https://ranchertest.io/auth?client_id=%3Cnil%3E&response_type=code&redirect_uri=https://example.com/callback",
++				"scopes":             "openid profile email",
++				"logoutAllSupported": false,
++				"logoutAllEnabled":   false,
++				"logoutAllForced":    false,
++			},
++			wantErr: false,
++		},
++		{
++			name: "missing rancherUrl - should still work but redirect URL will be incomplete",
++			authConfig: map[string]any{
++				"metadata":     map[string]any{"name": "genericoidc"},
++				"clientId":     "client123",
++				"scope":        "openid profile email",
++				"issuer":       "https://ranchertest.io/issuer",
++				"authEndpoint": "https://ranchertest.io/auth",
++			},
++			expected: map[string]any{
++				"id":                 "genericoidc",
++				"redirectUrl":        "https://ranchertest.io/auth?client_id=client123&response_type=code&redirect_uri=%3Cnil%3E",
++				"scopes":             "openid profile email",
++				"logoutAllSupported": false,
++				"logoutAllEnabled":   false,
++				"logoutAllForced":    false,
++			},
++			wantErr: false,
++		},
++		{
++			name: "with rancherApiHost configured - should return correct redirect URL",
++			authConfig: map[string]any{
++				"metadata":       map[string]any{"name": "genericoidc"},
++				"clientId":       "client123",
++				"rancherUrl":     "https://example.com/callback",
++				"rancherApiHost": "https://api.example.com",
++				"scope":          "openid profile email",
++				"issuer":         "https://ranchertest.io/issuer",
++			},
++			expected: map[string]any{
++				"id":                 "genericoidc",
++				"redirectUrl":        "https://api.example.com/v1-oidc/genericoidc",
++				"scopes":             "openid profile email",
++				"logoutAllSupported": false,
++				"logoutAllEnabled":   false,
++				"logoutAllForced":    false,
++			},
++			wantErr: false,
+ 		},
+ 	}
+ 
+@@ -368,8 +580,12 @@ func TestGenOIDCProvider_TransformToAuthProvider(t *testing.T) {
+ 		t.Run(test.name, func(t *testing.T) {
+ 			t.Parallel()
+ 			result, err := provider.TransformToAuthProvider(test.authConfig)
+-			assert.NoError(t, err)
+-			assert.Equal(t, test.expected, result)
++			if test.wantErr {
++				assert.Error(t, err)
++			} else {
++				assert.NoError(t, err)
++				assert.Equal(t, test.expected, result)
++			}
+ 		})
+ 	}
+ }
