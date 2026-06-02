@@ -1,0 +1,324 @@
+diff --git a/pkg/api/steve/settings/settings.go b/pkg/api/steve/settings/settings.go
+index f4aea0fa6..7019c0ee1 100644
+--- a/pkg/api/steve/settings/settings.go
++++ b/pkg/api/steve/settings/settings.go
+@@ -10,10 +10,9 @@ func Register(server *steve.Server) {
+ 	server.SchemaFactory.AddTemplate(schema2.Template{
+ 		Group: "management.cattle.io",
+ 		Kind:  "Setting",
+-		Formatter: func(request *types.APIRequest, resource *types.RawResource) {
+-			data := resource.APIObject.Data()
+-			if data.String("value") == "" {
+-				data.Set("value", data.String("default"))
++		StoreFactory: func(innerStore types.Store) types.Store {
++			return &store{
++				Store: innerStore,
+ 			}
+ 		},
+ 	})
+diff --git a/pkg/api/steve/settings/store.go b/pkg/api/steve/settings/store.go
+new file mode 100644
+index 000000000..91767cf73
+--- /dev/null
++++ b/pkg/api/steve/settings/store.go
+@@ -0,0 +1,36 @@
++package settings
++
++import (
++	"github.com/rancher/apiserver/pkg/types"
++)
++
++type store struct {
++	types.Store
++}
++
++func (s *store) List(apiOp *types.APIRequest, schema *types.APISchema) (types.APIObjectList, error) {
++	result, err := s.Store.List(apiOp, schema)
++	if err != nil {
++		return result, err
++	}
++	for i := range result.Objects {
++		applyDefaultIfEmpty(result.Objects[i])
++	}
++	return result, nil
++}
++
++func (s *store) ByID(apiOp *types.APIRequest, schema *types.APISchema, id string) (types.APIObject, error) {
++	result, err := s.Store.ByID(apiOp, schema, id)
++	if err != nil {
++		return result, err
++	}
++	applyDefaultIfEmpty(result)
++	return result, nil
++}
++
++func applyDefaultIfEmpty(obj types.APIObject) {
++	data := obj.Data()
++	if data.String("value") == "" {
++		data.Set("value", data.String("default"))
++	}
++}
+diff --git a/pkg/api/steve/settings/store_test.go b/pkg/api/steve/settings/store_test.go
+new file mode 100644
+index 000000000..9b419bc66
+--- /dev/null
++++ b/pkg/api/steve/settings/store_test.go
+@@ -0,0 +1,258 @@
++package settings
++
++import (
++	"testing"
++
++	"github.com/rancher/apiserver/pkg/types"
++	"github.com/stretchr/testify/assert"
++	"github.com/stretchr/testify/require"
++)
++
++type mockStore struct {
++	listFunc  func() (types.APIObjectList, error)
++	byIDFunc  func(id string) (types.APIObject, error)
++}
++
++func (m *mockStore) List(apiOp *types.APIRequest, schema *types.APISchema) (types.APIObjectList, error) {
++	return m.listFunc()
++}
++
++func (m *mockStore) ByID(apiOp *types.APIRequest, schema *types.APISchema, id string) (types.APIObject, error) {
++	return m.byIDFunc(id)
++}
++
++func TestStore_ListAppliesDefaultToAllObjects(t *testing.T) {
++	t.Parallel()
++
++	mock := &mockStore{
++		listFunc: func() (types.APIObjectList, error) {
++			return types.APIObjectList{
++				Objects: []types.APIObject{
++					{
++						ID:   "setting-1",
++						Type: "management.cattle.io.setting",
++						Object: map[string]interface{}{
++							"metadata": map[string]interface{}{"name": "setting-1"},
++							"default":  "default-value-1",
++							"value":    "",
++						},
++					},
++					{
++						ID:   "setting-2",
++						Type: "management.cattle.io.setting",
++						Object: map[string]interface{}{
++							"metadata": map[string]interface{}{"name": "setting-2"},
++							"default":  "default-value-2",
++							"value":    "custom-value",
++						},
++					},
++					{
++						ID:   "setting-3",
++						Type: "management.cattle.io.setting",
++						Object: map[string]interface{}{
++							"metadata": map[string]interface{}{"name": "setting-3"},
++							"default":  "default-value-3",
++						},
++					},
++				},
++			}, nil
++		},
++	}
++
++	s := &store{Store: mock}
++
++	result, err := s.List(&types.APIRequest{}, nil)
++	require.NoError(t, err)
++	require.Len(t, result.Objects, 3)
++
++	assert.Equal(t, "default-value-1", result.Objects[0].Data().String("value"))
++	assert.Equal(t, "custom-value", result.Objects[1].Data().String("value"))
++	assert.Equal(t, "default-value-3", result.Objects[2].Data().String("value"))
++}
++
++func TestStore_ByIDAppliesDefault(t *testing.T) {
++	t.Parallel()
++
++	tests := []struct {
++		name          string
++		inputValue    interface{}
++		inputDefault  string
++		expectedValue string
++	}{
++		{
++			name:          "empty value uses default",
++			inputValue:    "",
++			inputDefault:  "my-default",
++			expectedValue: "my-default",
++		},
++		{
++			name:          "missing value field uses default",
++			inputValue:    nil,
++			inputDefault:  "my-default",
++			expectedValue: "my-default",
++		},
++		{
++			name:          "non-empty value kept as-is",
++			inputValue:    "my-custom-value",
++			inputDefault:  "my-default",
++			expectedValue: "my-custom-value",
++		},
++	}
++
++	for _, tt := range tests {
++		t.Run(tt.name, func(t *testing.T) {
++			t.Parallel()
++
++			objData := map[string]interface{}{
++				"metadata": map[string]interface{}{"name": "test-setting"},
++				"default":  tt.inputDefault,
++			}
++			if tt.inputValue != nil {
++				objData["value"] = tt.inputValue
++			}
++
++			mock := &mockStore{
++				byIDFunc: func(id string) (types.APIObject, error) {
++					return types.APIObject{
++						ID:     id,
++						Type:   "management.cattle.io.setting",
++						Object: objData,
++					}, nil
++				},
++			}
++
++			s := &store{Store: mock}
++
++			result, err := s.ByID(&types.APIRequest{}, nil, "test-setting")
++			require.NoError(t, err)
++			assert.Equal(t, tt.expectedValue, result.Data().String("value"))
++		})
++	}
++}
++
++func TestStore_ListPreservesError(t *testing.T) {
++	t.Parallel()
++
++	expectedErr := assert.AnError
++	mock := &mockStore{
++		listFunc: func() (types.APIObjectList, error) {
++			return types.APIObjectList{}, expectedErr
++		},
++	}
++
++	s := &store{Store: mock}
++
++	_, err := s.List(&types.APIRequest{}, nil)
++	require.ErrorIs(t, err, expectedErr)
++}
++
++func TestStore_ByIDPreservesError(t *testing.T) {
++	t.Parallel()
++
++	expectedErr := assert.AnError
++	mock := &mockStore{
++		byIDFunc: func(id string) (types.APIObject, error) {
++			return types.APIObject{}, expectedErr
++		},
++	}
++
++	s := &store{Store: mock}
++
++	_, err := s.ByID(&types.APIRequest{}, nil, "test-setting")
++	require.ErrorIs(t, err, expectedErr)
++}
++
++func TestApplyDefaultIfEmpty(t *testing.T) {
++	t.Parallel()
++
++	tests := []struct {
++		name          string
++		obj           types.APIObject
++		expectedValue string
++	}{
++		{
++			name: "empty string value gets default",
++			obj: types.APIObject{
++				Object: map[string]interface{}{
++					"default": "fallback",
++					"value":   "",
++				},
++			},
++			expectedValue: "fallback",
++		},
++		{
++			name: "missing value field gets default",
++			obj: types.APIObject{
++				Object: map[string]interface{}{
++					"default": "fallback",
++				},
++			},
++			expectedValue: "fallback",
++		},
++		{
++			name: "non-empty value preserved",
++			obj: types.APIObject{
++				Object: map[string]interface{}{
++					"default": "fallback",
++					"value":   "explicit",
++				},
++			},
++			expectedValue: "explicit",
++		},
++	}
++
++	for _, tt := range tests {
++		t.Run(tt.name, func(t *testing.T) {
++			t.Parallel()
++
++			applyDefaultIfEmpty(tt.obj)
++			assert.Equal(t, tt.expectedValue, tt.obj.Data().String("value"))
++		})
++	}
++}
++
++func TestStore_ListEmptyResult(t *testing.T) {
++	t.Parallel()
++
++	mock := &mockStore{
++		listFunc: func() (types.APIObjectList, error) {
++			return types.APIObjectList{Objects: []types.APIObject{}}, nil
++		},
++	}
++
++	s := &store{Store: mock}
++
++	result, err := s.List(&types.APIRequest{}, nil)
++	require.NoError(t, err)
++	assert.Empty(t, result.Objects)
++}
++
++func TestStore_DataMutationIsInPlace(t *testing.T) {
++	t.Parallel()
++
++	obj := types.APIObject{
++		ID:   "test",
++		Type: "management.cattle.io.setting",
++		Object: map[string]interface{}{
++			"metadata": map[string]interface{}{"name": "test"},
++			"default":  "default-val",
++			"value":    "",
++		},
++	}
++
++	mock := &mockStore{
++		listFunc: func() (types.APIObjectList, error) {
++			return types.APIObjectList{Objects: []types.APIObject{obj}}, nil
++		},
++	}
++
++	s := &store{Store: mock}
++
++	result, err := s.List(&types.APIRequest{}, nil)
++	require.NoError(t, err)
++	require.Len(t, result.Objects, 1)
++
++	d := result.Objects[0].Data()
++	assert.Equal(t, "default-val", d.String("value"))
++	assert.Equal(t, "default-val", d.String("default"))
++}
