@@ -1,0 +1,343 @@
+diff --git a/pkg/auth/providers/activedirectory/guid/guid.go b/pkg/auth/providers/activedirectory/guid/guid.go
+index 0ae2536f4..b8eb9ef07 100644
+--- a/pkg/auth/providers/activedirectory/guid/guid.go
++++ b/pkg/auth/providers/activedirectory/guid/guid.go
+@@ -19,12 +19,19 @@
+ import (
+ 	"encoding/hex"
+ 	"errors"
+-	"fmt"
+-	"regexp"
+-	"strings"
+ )
+ 
+-var uuidRegex = regexp.MustCompile("(?i)^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
++const (
++	encodedLen    = 16
++	uuidStringLen = 36
++	lowerHexTable = "0123456789abcdef"
++	upperHexTable = "0123456789ABCDEF"
++)
++
++var (
++	errInvalidLength = errors.New("cannot create GUID from encoded bytes: invalid length")
++	errInvalidFormat = errors.New("cannot parse UUID to objectGUID: invalid format")
++)
+ 
+ // GUID represent the UUID in the DSP0134 spec
+ type GUID []byte
+@@ -41,33 +48,54 @@ func (g GUID) String() string {
+ 
+ // UUID returns the UUID string representation: "00112233-4455-6677-8899-AABBCCDDEEFF"
+ func (g GUID) UUID() string {
+-	if len(g) != 16 {
++	if len(g) != encodedLen {
+ 		return ""
+ 	}
+ 
+-	u := swap(g)
+-
+-	return fmt.Sprintf(
+-		"%x-%x-%x-%x-%x",
+-		u[:4], u[4:6], u[6:8], u[8:10], u[10:],
+-	)
++	var raw [encodedLen]byte
++	raw[0], raw[1], raw[2], raw[3] = g[3], g[2], g[1], g[0]
++	raw[4], raw[5] = g[5], g[4]
++	raw[6], raw[7] = g[7], g[6]
++	copy(raw[8:], g[8:])
++
++	var buf [uuidStringLen]byte
++	hex.Encode(buf[0:8], raw[0:4])
++	buf[8] = '-'
++	hex.Encode(buf[9:13], raw[4:6])
++	buf[13] = '-'
++	hex.Encode(buf[14:18], raw[6:8])
++	buf[18] = '-'
++	hex.Encode(buf[19:23], raw[8:10])
++	buf[23] = '-'
++	hex.Encode(buf[24:36], raw[10:16])
++
++	return string(buf[:])
+ }
+ 
+ // Hex returns the Hex string representation: "33 22 11 00 55 44 77 66 88 99 AA BB CC DD EE FF"
+ func (g GUID) Hex() string {
+-	hexesArr := hexes(g.Bytes())
++	if len(g) == 0 {
++		return ""
++	}
+ 
+-	for i := range hexesArr {
+-		hexesArr[i] = strings.ToUpper(hexesArr[i])
++	buf := make([]byte, len(g)*3-1)
++	pos := 0
++	for i, b := range g {
++		if i > 0 {
++			buf[pos] = ' '
++			pos++
++		}
++		encodeHexByte(buf[pos:pos+2], b, upperHexTable)
++		pos += 2
+ 	}
+ 
+-	return strings.Join(hexesArr, " ")
++	return string(buf)
+ }
+ 
+ // New returns a GUID object
+ func New(encoded []byte) (GUID, error) {
+-	if len(encoded) != 16 {
+-		return nil, errors.New("cannot create GUID from encoded bytes: invalid length")
++	if len(encoded) != encodedLen {
++		return nil, errInvalidLength
+ 	}
+ 
+ 	return GUID(encoded), nil
+@@ -75,17 +103,63 @@ func New(encoded []byte) (GUID, error) {
+ 
+ // Parse returns a GUID object from a RFC4122 UUID string
+ func Parse(uuid string) (GUID, error) {
+-	if !uuidRegex.MatchString(uuid) {
+-		return nil, errors.New("cannot parse UUID to objectGUID: invalid format")
++	if len(uuid) != uuidStringLen || uuid[8] != '-' || uuid[13] != '-' || uuid[18] != '-' || uuid[23] != '-' {
++		return nil, errInvalidFormat
+ 	}
+ 
+-	uuid = strings.ReplaceAll(uuid, "-", "")
+-	uuidBytes, err := hex.DecodeString(uuid)
+-	if err != nil {
+-		return nil, fmt.Errorf("cannot decode uuid string '%s' to hex: %w", uuid, err)
++	guid := make([]byte, encodedLen)
++	var ok bool
++
++	if guid[0], ok = decodeHexByte(uuid, 6); !ok {
++		return nil, errInvalidFormat
++	}
++	if guid[1], ok = decodeHexByte(uuid, 4); !ok {
++		return nil, errInvalidFormat
++	}
++	if guid[2], ok = decodeHexByte(uuid, 2); !ok {
++		return nil, errInvalidFormat
++	}
++	if guid[3], ok = decodeHexByte(uuid, 0); !ok {
++		return nil, errInvalidFormat
++	}
++	if guid[4], ok = decodeHexByte(uuid, 11); !ok {
++		return nil, errInvalidFormat
++	}
++	if guid[5], ok = decodeHexByte(uuid, 9); !ok {
++		return nil, errInvalidFormat
++	}
++	if guid[6], ok = decodeHexByte(uuid, 16); !ok {
++		return nil, errInvalidFormat
++	}
++	if guid[7], ok = decodeHexByte(uuid, 14); !ok {
++		return nil, errInvalidFormat
++	}
++	if guid[8], ok = decodeHexByte(uuid, 19); !ok {
++		return nil, errInvalidFormat
++	}
++	if guid[9], ok = decodeHexByte(uuid, 21); !ok {
++		return nil, errInvalidFormat
++	}
++	if guid[10], ok = decodeHexByte(uuid, 24); !ok {
++		return nil, errInvalidFormat
++	}
++	if guid[11], ok = decodeHexByte(uuid, 26); !ok {
++		return nil, errInvalidFormat
++	}
++	if guid[12], ok = decodeHexByte(uuid, 28); !ok {
++		return nil, errInvalidFormat
++	}
++	if guid[13], ok = decodeHexByte(uuid, 30); !ok {
++		return nil, errInvalidFormat
++	}
++	if guid[14], ok = decodeHexByte(uuid, 32); !ok {
++		return nil, errInvalidFormat
++	}
++	if guid[15], ok = decodeHexByte(uuid, 34); !ok {
++		return nil, errInvalidFormat
+ 	}
+ 
+-	return GUID(swap(uuidBytes)), nil
++	return GUID(guid), nil
+ }
+ 
+ // Escape returns an escaped string format of the objectGUID that can be safely used
+@@ -93,38 +167,44 @@ func Parse(uuid string) (GUID, error) {
+ // and prefixed with the '\' character. If a byte has a hex encoded string of
+ // length 1 then it will be prefixed with a '0'.
+ func Escape(guid GUID) string {
+-	builder := strings.Builder{}
++	if len(guid) == 0 {
++		return ""
++	}
+ 
+-	hexArray := hexes(guid.Bytes())
+-	for _, hex := range hexArray {
+-		builder.WriteString(`\`)
+-		builder.WriteString(hex)
++	buf := make([]byte, len(guid)*3)
++	for i, b := range guid {
++		pos := i * 3
++		buf[pos] = '\\'
++		encodeHexByte(buf[pos+1:pos+3], b, lowerHexTable)
+ 	}
+ 
+-	return builder.String()
++	return string(buf)
+ }
+ 
+-// swap will return a new array with the first three "bytes blocks" reversed
+-func swap(u []byte) []byte {
+-	if len(u) != 16 {
+-		return u
+-	}
++func encodeHexByte(dst []byte, b byte, table string) {
++	dst[0] = table[b>>4]
++	dst[1] = table[b&0x0f]
++}
+ 
+-	return []byte{
+-		u[3], u[2], u[1], u[0], // reverse 0-4
+-		u[5], u[4], // reverse 4-5
+-		u[7], u[6], // reverse 6-7
+-		u[8], u[9], u[10], u[11], u[12], u[13], u[14], u[15], // keep 8-15
++func decodeHexByte(value string, offset int) (byte, bool) {
++	hi := decodeHexNibble(value[offset])
++	lo := decodeHexNibble(value[offset+1])
++	if hi == 0xFF || lo == 0xFF {
++		return 0, false
+ 	}
+-}
+ 
+-// hexes returns a string array of the hex decoded values
+-func hexes(bytes []byte) []string {
+-	var hexes []string
++	return hi<<4 | lo, true
++}
+ 
+-	for _, b := range bytes {
+-		hexes = append(hexes, fmt.Sprintf("%02x", b))
++func decodeHexNibble(b byte) byte {
++	switch {
++	case b >= '0' && b <= '9':
++		return b - '0'
++	case b >= 'a' && b <= 'f':
++		return b - 'a' + 10
++	case b >= 'A' && b <= 'F':
++		return b - 'A' + 10
++	default:
++		return 0xFF
+ 	}
+-
+-	return hexes
+ }
+diff --git a/pkg/auth/providers/activedirectory/guid/guid_test.go b/pkg/auth/providers/activedirectory/guid/guid_test.go
+index 42e503ebb..3441b1790 100644
+--- a/pkg/auth/providers/activedirectory/guid/guid_test.go
++++ b/pkg/auth/providers/activedirectory/guid/guid_test.go
+@@ -8,6 +8,11 @@
+ 	"github.com/rancher/rancher/pkg/auth/providers/activedirectory/guid"
+ )
+ 
++var (
++	benchmarkUUID = "3d0ef6af-965b-44e3-8fea-b23a7d3aa6cb"
++	benchmarkGUID = guid.GUID([]byte("\xaf\xf6\x0e=[\x96\xe3D\x8f\xea\xb2:}:\xa6\xcb"))
++)
++
+ func TestDecodings(t *testing.T) {
+ 	tt := []struct {
+ 		name         string
+@@ -46,8 +51,6 @@ func TestDecodings(t *testing.T) {
+ 			expectedErr: "invalid length",
+ 		},
+ 		{
+-			// This test data was taken from the following MS example:
+-			// https://learn.microsoft.com/en-us/dotnet/api/system.guid.tobytearray?view=net-8.0
+ 			name:         "Microsoft GUID",
+ 			encoded:      []byte("\xC9\x8B\x91\x35\x6D\x19\xEA\x40\x97\x79\x88\x9D\x79\xB7\x53\xF0"),
+ 			expectedUUID: "35918bc9-196d-40ea-9779-889d79b753f0",
+@@ -105,6 +108,11 @@ func TestParse(t *testing.T) {
+ 			uuid:         "4e4e4e4e-4e4e-4e4e-4e4e-4e4e4e4e4e4e",
+ 			expectedGUID: []byte("\x4e\x4e\x4e\x4e\x4e\x4e\x4e\x4e\x4e\x4e\x4e\x4e\x4e\x4e\x4e\x4e"),
+ 		},
++		{
++			name:        "uppercase uuid",
++			uuid:        "3D0EF6AF-965B-44E3-8FEA-B23A7D3AA6CB",
++			expectedGUID: []byte("\xaf\xf6\x0e=[\x96\xe3D\x8f\xea\xb2:}:\xa6\xcb"),
++		},
+ 		{
+ 			name:        "invalid uuid",
+ 			uuid:        "75593fbf",
+@@ -115,6 +123,11 @@ func TestParse(t *testing.T) {
+ 			uuid:        "",
+ 			expectedErr: "invalid format",
+ 		},
++		{
++			name:        "uuid with invalid character",
++			uuid:        "3d0ef6ag-965b-44e3-8fea-b23a7d3aa6cb",
++			expectedErr: "invalid format",
++		},
+ 	}
+ 
+ 	for _, tc := range tt {
+@@ -132,6 +145,13 @@ func TestParse(t *testing.T) {
+ 	}
+ }
+ 
++func TestRoundTrip(t *testing.T) {
++	objectGUID, err := guid.Parse("3D0EF6AF-965B-44E3-8FEA-B23A7D3AA6CB")
++	assert.NoError(t, err)
++	assert.Equal(t, benchmarkUUID, objectGUID.UUID())
++	assert.Equal(t, benchmarkUUID, objectGUID.String())
++}
++
+ func TestEscape(t *testing.T) {
+ 	tt := []struct {
+ 		name        string
+@@ -177,3 +197,43 @@ func TestEscape(t *testing.T) {
+ 		})
+ 	}
+ }
++
++func BenchmarkParse(b *testing.B) {
++	b.ReportAllocs()
++	for i := 0; i < b.N; i++ {
++		parsedGUID, err := guid.Parse(benchmarkUUID)
++		if err != nil {
++			b.Fatal(err)
++		}
++		if len(parsedGUID) != 16 {
++			b.Fatalf("unexpected guid length: %d", len(parsedGUID))
++		}
++	}
++}
++
++func BenchmarkUUID(b *testing.B) {
++	b.ReportAllocs()
++	for i := 0; i < b.N; i++ {
++		if benchmarkGUID.UUID() != benchmarkUUID {
++			b.Fatal("unexpected uuid")
++		}
++	}
++}
++
++func BenchmarkHex(b *testing.B) {
++	b.ReportAllocs()
++	for i := 0; i < b.N; i++ {
++		if benchmarkGUID.Hex() == "" {
++			b.Fatal("unexpected empty hex")
++		}
++	}
++}
++
++func BenchmarkEscape(b *testing.B) {
++	b.ReportAllocs()
++	for i := 0; i < b.N; i++ {
++		if guid.Escape(benchmarkGUID) == "" {
++			b.Fatal("unexpected empty escaped guid")
++		}
++	}
++}

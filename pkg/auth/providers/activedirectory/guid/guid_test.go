@@ -8,6 +8,11 @@ import (
 	"github.com/rancher/rancher/pkg/auth/providers/activedirectory/guid"
 )
 
+var (
+	benchmarkUUID = "3d0ef6af-965b-44e3-8fea-b23a7d3aa6cb"
+	benchmarkGUID = guid.GUID([]byte("\xaf\xf6\x0e=[\x96\xe3D\x8f\xea\xb2:}:\xa6\xcb"))
+)
+
 func TestDecodings(t *testing.T) {
 	tt := []struct {
 		name         string
@@ -46,8 +51,6 @@ func TestDecodings(t *testing.T) {
 			expectedErr: "invalid length",
 		},
 		{
-			// This test data was taken from the following MS example:
-			// https://learn.microsoft.com/en-us/dotnet/api/system.guid.tobytearray?view=net-8.0
 			name:         "Microsoft GUID",
 			encoded:      []byte("\xC9\x8B\x91\x35\x6D\x19\xEA\x40\x97\x79\x88\x9D\x79\xB7\x53\xF0"),
 			expectedUUID: "35918bc9-196d-40ea-9779-889d79b753f0",
@@ -106,6 +109,11 @@ func TestParse(t *testing.T) {
 			expectedGUID: []byte("\x4e\x4e\x4e\x4e\x4e\x4e\x4e\x4e\x4e\x4e\x4e\x4e\x4e\x4e\x4e\x4e"),
 		},
 		{
+			name:        "uppercase uuid",
+			uuid:        "3D0EF6AF-965B-44E3-8FEA-B23A7D3AA6CB",
+			expectedGUID: []byte("\xaf\xf6\x0e=[\x96\xe3D\x8f\xea\xb2:}:\xa6\xcb"),
+		},
+		{
 			name:        "invalid uuid",
 			uuid:        "75593fbf",
 			expectedErr: "invalid format",
@@ -113,6 +121,11 @@ func TestParse(t *testing.T) {
 		{
 			name:        "empty uuid",
 			uuid:        "",
+			expectedErr: "invalid format",
+		},
+		{
+			name:        "uuid with invalid character",
+			uuid:        "3d0ef6ag-965b-44e3-8fea-b23a7d3aa6cb",
 			expectedErr: "invalid format",
 		},
 	}
@@ -130,6 +143,13 @@ func TestParse(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestRoundTrip(t *testing.T) {
+	objectGUID, err := guid.Parse("3D0EF6AF-965B-44E3-8FEA-B23A7D3AA6CB")
+	assert.NoError(t, err)
+	assert.Equal(t, benchmarkUUID, objectGUID.UUID())
+	assert.Equal(t, benchmarkUUID, objectGUID.String())
 }
 
 func TestEscape(t *testing.T) {
@@ -175,5 +195,45 @@ func TestEscape(t *testing.T) {
 			escaped := guid.Escape(tc.objectGUID)
 			assert.Equal(t, tc.escapedGUID, escaped)
 		})
+	}
+}
+
+func BenchmarkParse(b *testing.B) {
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		parsedGUID, err := guid.Parse(benchmarkUUID)
+		if err != nil {
+			b.Fatal(err)
+		}
+		if len(parsedGUID) != 16 {
+			b.Fatalf("unexpected guid length: %d", len(parsedGUID))
+		}
+	}
+}
+
+func BenchmarkUUID(b *testing.B) {
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		if benchmarkGUID.UUID() != benchmarkUUID {
+			b.Fatal("unexpected uuid")
+		}
+	}
+}
+
+func BenchmarkHex(b *testing.B) {
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		if benchmarkGUID.Hex() == "" {
+			b.Fatal("unexpected empty hex")
+		}
+	}
+}
+
+func BenchmarkEscape(b *testing.B) {
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		if guid.Escape(benchmarkGUID) == "" {
+			b.Fatal("unexpected empty escaped guid")
+		}
 	}
 }
