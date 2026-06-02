@@ -17,17 +17,43 @@
 package guid
 
 import (
-	"encoding/hex"
 	"errors"
-	"fmt"
-	"regexp"
-	"strings"
 )
-
-var uuidRegex = regexp.MustCompile("(?i)^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
 
 // GUID represent the UUID in the DSP0134 spec
 type GUID []byte
+
+const hexTable = "0123456789abcdef"
+const hexTableUpper = "0123456789ABCDEF"
+
+func encodeHexByte(dst []byte, b byte, table string) {
+	dst[0] = table[b>>4]
+	dst[1] = table[b&0x0f]
+}
+
+func decodeHexChar(c byte) (byte, bool) {
+	switch {
+	case '0' <= c && c <= '9':
+		return c - '0', true
+	case 'a' <= c && c <= 'f':
+		return c - 'a' + 10, true
+	case 'A' <= c && c <= 'F':
+		return c - 'A' + 10, true
+	}
+	return 0, false
+}
+
+func decodeHexByte(s string, i int) (byte, bool) {
+	if i+1 >= len(s) {
+		return 0, false
+	}
+	a, ok1 := decodeHexChar(s[i])
+	b, ok2 := decodeHexChar(s[i+1])
+	if !ok1 || !ok2 {
+		return 0, false
+	}
+	return (a << 4) | b, true
+}
 
 // Bytes returns the underlying bytes value
 func (g GUID) Bytes() []byte {
@@ -45,23 +71,46 @@ func (g GUID) UUID() string {
 		return ""
 	}
 
-	u := swap(g)
+	var buf [36]byte
+	encodeHexByte(buf[0:2], g[3], hexTable)
+	encodeHexByte(buf[2:4], g[2], hexTable)
+	encodeHexByte(buf[4:6], g[1], hexTable)
+	encodeHexByte(buf[6:8], g[0], hexTable)
+	buf[8] = '-'
+	encodeHexByte(buf[9:11], g[5], hexTable)
+	encodeHexByte(buf[11:13], g[4], hexTable)
+	buf[13] = '-'
+	encodeHexByte(buf[14:16], g[7], hexTable)
+	encodeHexByte(buf[16:18], g[6], hexTable)
+	buf[18] = '-'
+	encodeHexByte(buf[19:21], g[8], hexTable)
+	encodeHexByte(buf[21:23], g[9], hexTable)
+	buf[23] = '-'
+	encodeHexByte(buf[24:26], g[10], hexTable)
+	encodeHexByte(buf[26:28], g[11], hexTable)
+	encodeHexByte(buf[28:30], g[12], hexTable)
+	encodeHexByte(buf[30:32], g[13], hexTable)
+	encodeHexByte(buf[32:34], g[14], hexTable)
+	encodeHexByte(buf[34:36], g[15], hexTable)
 
-	return fmt.Sprintf(
-		"%x-%x-%x-%x-%x",
-		u[:4], u[4:6], u[6:8], u[8:10], u[10:],
-	)
+	return string(buf[:])
 }
 
 // Hex returns the Hex string representation: "33 22 11 00 55 44 77 66 88 99 AA BB CC DD EE FF"
 func (g GUID) Hex() string {
-	hexesArr := hexes(g.Bytes())
-
-	for i := range hexesArr {
-		hexesArr[i] = strings.ToUpper(hexesArr[i])
+	if len(g) == 0 {
+		return ""
 	}
 
-	return strings.Join(hexesArr, " ")
+	buf := make([]byte, len(g)*3-1)
+	for i, b := range g {
+		if i > 0 {
+			buf[i*3-1] = ' '
+		}
+		encodeHexByte(buf[i*3:i*3+2], b, hexTableUpper)
+	}
+
+	return string(buf)
 }
 
 // New returns a GUID object
@@ -75,17 +124,67 @@ func New(encoded []byte) (GUID, error) {
 
 // Parse returns a GUID object from a RFC4122 UUID string
 func Parse(uuid string) (GUID, error) {
-	if !uuidRegex.MatchString(uuid) {
+	if len(uuid) != 36 || uuid[8] != '-' || uuid[13] != '-' || uuid[18] != '-' || uuid[23] != '-' {
 		return nil, errors.New("cannot parse UUID to objectGUID: invalid format")
 	}
 
-	uuid = strings.ReplaceAll(uuid, "-", "")
-	uuidBytes, err := hex.DecodeString(uuid)
-	if err != nil {
-		return nil, fmt.Errorf("cannot decode uuid string '%s' to hex: %w", uuid, err)
+	g := make(GUID, 16)
+	var ok bool
+
+	if g[3], ok = decodeHexByte(uuid, 0); !ok {
+		return nil, errors.New("cannot parse UUID to objectGUID: invalid format")
+	}
+	if g[2], ok = decodeHexByte(uuid, 2); !ok {
+		return nil, errors.New("cannot parse UUID to objectGUID: invalid format")
+	}
+	if g[1], ok = decodeHexByte(uuid, 4); !ok {
+		return nil, errors.New("cannot parse UUID to objectGUID: invalid format")
+	}
+	if g[0], ok = decodeHexByte(uuid, 6); !ok {
+		return nil, errors.New("cannot parse UUID to objectGUID: invalid format")
 	}
 
-	return GUID(swap(uuidBytes)), nil
+	if g[5], ok = decodeHexByte(uuid, 9); !ok {
+		return nil, errors.New("cannot parse UUID to objectGUID: invalid format")
+	}
+	if g[4], ok = decodeHexByte(uuid, 11); !ok {
+		return nil, errors.New("cannot parse UUID to objectGUID: invalid format")
+	}
+
+	if g[7], ok = decodeHexByte(uuid, 14); !ok {
+		return nil, errors.New("cannot parse UUID to objectGUID: invalid format")
+	}
+	if g[6], ok = decodeHexByte(uuid, 16); !ok {
+		return nil, errors.New("cannot parse UUID to objectGUID: invalid format")
+	}
+
+	if g[8], ok = decodeHexByte(uuid, 19); !ok {
+		return nil, errors.New("cannot parse UUID to objectGUID: invalid format")
+	}
+	if g[9], ok = decodeHexByte(uuid, 21); !ok {
+		return nil, errors.New("cannot parse UUID to objectGUID: invalid format")
+	}
+
+	if g[10], ok = decodeHexByte(uuid, 24); !ok {
+		return nil, errors.New("cannot parse UUID to objectGUID: invalid format")
+	}
+	if g[11], ok = decodeHexByte(uuid, 26); !ok {
+		return nil, errors.New("cannot parse UUID to objectGUID: invalid format")
+	}
+	if g[12], ok = decodeHexByte(uuid, 28); !ok {
+		return nil, errors.New("cannot parse UUID to objectGUID: invalid format")
+	}
+	if g[13], ok = decodeHexByte(uuid, 30); !ok {
+		return nil, errors.New("cannot parse UUID to objectGUID: invalid format")
+	}
+	if g[14], ok = decodeHexByte(uuid, 32); !ok {
+		return nil, errors.New("cannot parse UUID to objectGUID: invalid format")
+	}
+	if g[15], ok = decodeHexByte(uuid, 34); !ok {
+		return nil, errors.New("cannot parse UUID to objectGUID: invalid format")
+	}
+
+	return g, nil
 }
 
 // Escape returns an escaped string format of the objectGUID that can be safely used
@@ -93,38 +192,15 @@ func Parse(uuid string) (GUID, error) {
 // and prefixed with the '\' character. If a byte has a hex encoded string of
 // length 1 then it will be prefixed with a '0'.
 func Escape(guid GUID) string {
-	builder := strings.Builder{}
-
-	hexArray := hexes(guid.Bytes())
-	for _, hex := range hexArray {
-		builder.WriteString(`\`)
-		builder.WriteString(hex)
+	if len(guid) == 0 {
+		return ""
 	}
 
-	return builder.String()
-}
-
-// swap will return a new array with the first three "bytes blocks" reversed
-func swap(u []byte) []byte {
-	if len(u) != 16 {
-		return u
+	buf := make([]byte, len(guid)*3)
+	for i, b := range guid {
+		buf[i*3] = '\\'
+		encodeHexByte(buf[i*3+1:i*3+3], b, hexTable)
 	}
 
-	return []byte{
-		u[3], u[2], u[1], u[0], // reverse 0-4
-		u[5], u[4], // reverse 4-5
-		u[7], u[6], // reverse 6-7
-		u[8], u[9], u[10], u[11], u[12], u[13], u[14], u[15], // keep 8-15
-	}
-}
-
-// hexes returns a string array of the hex decoded values
-func hexes(bytes []byte) []string {
-	var hexes []string
-
-	for _, b := range bytes {
-		hexes = append(hexes, fmt.Sprintf("%02x", b))
-	}
-
-	return hexes
+	return string(buf)
 }
