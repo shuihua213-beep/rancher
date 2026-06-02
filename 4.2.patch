@@ -1,0 +1,380 @@
+diff --git a/pkg/api/steve/settings/settings.go b/pkg/api/steve/settings/settings.go
+index f4aea0fa6..8f8ca2de0 100644
+--- a/pkg/api/steve/settings/settings.go
++++ b/pkg/api/steve/settings/settings.go
+@@ -2,6 +2,7 @@
+ 
+ import (
+ 	"github.com/rancher/apiserver/pkg/types"
++	"github.com/rancher/rancher/pkg/settings"
+ 	schema2 "github.com/rancher/steve/pkg/schema"
+ 	steve "github.com/rancher/steve/pkg/server"
+ )
+@@ -10,11 +11,78 @@ func Register(server *steve.Server) {
+ 	server.SchemaFactory.AddTemplate(schema2.Template{
+ 		Group: "management.cattle.io",
+ 		Kind:  "Setting",
++		StoreFactory: func(innerStore types.Store) types.Store {
++			return &store{Store: innerStore}
++		},
+ 		Formatter: func(request *types.APIRequest, resource *types.RawResource) {
+ 			data := resource.APIObject.Data()
+ 			if data.String("value") == "" {
+-				data.Set("value", data.String("default"))
++				data.Set("value", resolveSettingValue(resource.ID, "", data.String("default"), nil))
+ 			}
+ 		},
+ 	})
+ }
++
++type store struct {
++	types.Store
++}
++
++func (s *store) ByID(apiOp *types.APIRequest, schema *types.APISchema, id string) (types.APIObject, error) {
++	result, err := s.Store.ByID(apiOp, schema, id)
++	if err != nil {
++		return result, err
++	}
++
++	applySettingValue(&result, settings.GetValues(id))
++	return result, nil
++}
++
++func (s *store) List(apiOp *types.APIRequest, schema *types.APISchema) (types.APIObjectList, error) {
++	result, err := s.Store.List(apiOp, schema)
++	if err != nil {
++		return result, err
++	}
++
++	values := settings.GetValues(missingSettingNames(result.Objects)...)
++	for i := range result.Objects {
++		applySettingValue(&result.Objects[i], values)
++	}
++
++	return result, nil
++}
++
++func missingSettingNames(objects []types.APIObject) []string {
++	names := make([]string, 0, len(objects))
++	seen := map[string]struct{}{}
++	for i := range objects {
++		if objects[i].Data().String("value") != "" {
++			continue
++		}
++		if _, ok := seen[objects[i].ID]; ok {
++			continue
++		}
++		seen[objects[i].ID] = struct{}{}
++		names = append(names, objects[i].ID)
++	}
++	return names
++}
++
++func applySettingValue(obj *types.APIObject, values map[string]string) {
++	data := obj.Data()
++	if data.String("value") != "" {
++		return
++	}
++	data.Set("value", resolveSettingValue(obj.ID, "", data.String("default"), values))
++}
++
++func resolveSettingValue(name, value, defaultValue string, values map[string]string) string {
++	if value != "" {
++		return value
++	}
++	if values != nil {
++		if resolved, ok := values[name]; ok && resolved != "" {
++			return resolved
++		}
++	}
++	return defaultValue
++}
+diff --git a/pkg/api/steve/settings/settings_test.go b/pkg/api/steve/settings/settings_test.go
+new file mode 100644
+index 000000000..ccae02754
+--- /dev/null
++++ b/pkg/api/steve/settings/settings_test.go
+@@ -0,0 +1,53 @@
++package settings
++
++import "testing"
++
++func TestResolveSettingValue(t *testing.T) {
++	t.Parallel()
++
++	tests := []struct {
++		name         string
++		settingName  string
++		value        string
++		defaultValue string
++		batchValues  map[string]string
++		want         string
++	}{
++		{
++			name:         "keeps explicit value",
++			settingName:  "server-url",
++			value:        "https://configured.example.com",
++			defaultValue: "https://default.example.com",
++			batchValues: map[string]string{
++				"server-url": "https://batch.example.com",
++			},
++			want: "https://configured.example.com",
++		},
++		{
++			name:         "uses batch value when setting is empty",
++			settingName:  "server-url",
++			defaultValue: "https://default.example.com",
++			batchValues: map[string]string{
++				"server-url": "https://batch.example.com",
++			},
++			want: "https://batch.example.com",
++		},
++		{
++			name:         "falls back to default to preserve response shape",
++			settingName:  "server-url",
++			defaultValue: "https://default.example.com",
++			batchValues:  map[string]string{},
++			want:         "https://default.example.com",
++		},
++	}
++
++	for _, tt := range tests {
++		t.Run(tt.name, func(t *testing.T) {
++			t.Parallel()
++			got := resolveSettingValue(tt.settingName, tt.value, tt.defaultValue, tt.batchValues)
++			if got != tt.want {
++				t.Fatalf("got %q, want %q", got, tt.want)
++			}
++		})
++	}
++}
+diff --git a/pkg/controllers/dashboardapi/settings/settings.go b/pkg/controllers/dashboardapi/settings/settings.go
+index 21a77574e..c12e945b9 100644
+--- a/pkg/controllers/dashboardapi/settings/settings.go
++++ b/pkg/controllers/dashboardapi/settings/settings.go
+@@ -10,6 +10,7 @@
+ 	"github.com/sirupsen/logrus"
+ 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+ 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
++	"k8s.io/apimachinery/pkg/labels"
+ 
+ 	v3 "github.com/rancher/rancher/pkg/apis/management.cattle.io/v3"
+ 	managementcontrollers "github.com/rancher/rancher/pkg/generated/controllers/management.cattle.io/v3"
+@@ -37,20 +38,105 @@ func (s *settingsProvider) Get(name string) string {
+ 		return value
+ 	}
+ 
+-	obj, err := s.settingCache.Get(name)
+-	if err != nil {
+-		val, err := s.settings.Get(name, metav1.GetOptions{})
+-		if err != nil {
++	var (
++		obj *v3.Setting
++		err error
++	)
++	if s.settingCache != nil {
++		obj, err = s.settingCache.Get(name)
++	}
++	if err != nil || obj == nil {
++		val, getErr := s.settings.Get(name, metav1.GetOptions{})
++		if getErr != nil {
+ 			return s.fallback[name]
+ 		}
+ 		obj = val
+ 	}
+ 
+-	if obj.Value == "" {
+-		return obj.Default
++	return effectiveValue(obj, s.fallback[name])
++}
++
++func (s *settingsProvider) GetAll(names ...string) map[string]string {
++	values := make(map[string]string, len(names))
++	if len(names) == 0 {
++		return values
+ 	}
+ 
+-	return obj.Value
++	remaining := make([]string, 0, len(names))
++	seen := map[string]struct{}{}
++	for _, name := range names {
++		if _, ok := seen[name]; ok {
++			continue
++		}
++		seen[name] = struct{}{}
++		key := settings.GetEnvKey(name)
++		if value, ok := os.LookupEnv(key); ok {
++			values[name] = value
++			continue
++		}
++		remaining = append(remaining, name)
++	}
++
++	if len(remaining) == 0 {
++		return values
++	}
++
++	stored, err := s.listSettings()
++	if err != nil {
++		for _, name := range remaining {
++			values[name] = s.fallback[name]
++		}
++		return values
++	}
++
++	for _, name := range remaining {
++		obj, ok := stored[name]
++		if !ok {
++			values[name] = s.fallback[name]
++			continue
++		}
++		values[name] = effectiveValue(obj, s.fallback[name])
++	}
++
++	return values
++}
++
++func (s *settingsProvider) listSettings() (map[string]*v3.Setting, error) {
++	if s.settingCache != nil {
++		items, err := s.settingCache.List(labels.Everything())
++		if err == nil {
++			result := make(map[string]*v3.Setting, len(items))
++			for _, item := range items {
++				result[item.Name] = item
++			}
++			return result, nil
++		}
++	}
++
++	list, err := s.settings.List(metav1.ListOptions{})
++	if err != nil {
++		return nil, err
++	}
++
++	result := make(map[string]*v3.Setting, len(list.Items))
++	for i := range list.Items {
++		item := &list.Items[i]
++		result[item.Name] = item
++	}
++	return result, nil
++}
++
++func effectiveValue(obj *v3.Setting, fallback string) string {
++	if obj == nil {
++		return fallback
++	}
++	if obj.Value != "" {
++		return obj.Value
++	}
++	if obj.Default != "" {
++		return obj.Default
++	}
++	return fallback
+ }
+ 
+ func (s *settingsProvider) Set(name, value string) error {
+diff --git a/pkg/controllers/dashboardapi/settings/settings_test.go b/pkg/controllers/dashboardapi/settings/settings_test.go
+index d7b15c979..44189e571 100644
+--- a/pkg/controllers/dashboardapi/settings/settings_test.go
++++ b/pkg/controllers/dashboardapi/settings/settings_test.go
+@@ -433,6 +433,69 @@ func TestSetAllWithDefaultOnUpgrade(t *testing.T) {
+ 	})
+ }
+ 
++func TestGetAllUsesCacheList(t *testing.T) {
++	ctrl := gomock.NewController(t)
++	client := fake.NewMockNonNamespacedControllerInterface[*v3.Setting, *v3.SettingList](ctrl)
++	cache := fake.NewMockNonNamespacedCacheInterface[*v3.Setting](ctrl)
++	provider := settingsProvider{
++		settings:     client,
++		settingCache: cache,
++		fallback: map[string]string{
++			"missing":  "fallback-value",
++			"from-env": "fallback-env",
++		},
++	}
++
++	t.Setenv(settings.GetEnvKey("from-env"), "env-value")
++	cache.EXPECT().List(gomock.Any()).Return([]*v3.Setting{
++		{
++			ObjectMeta: metav1.ObjectMeta{Name: "alpha"},
++			Value:      "configured-value",
++			Default:    "alpha-default",
++		},
++		{
++			ObjectMeta: metav1.ObjectMeta{Name: "beta"},
++			Default:    "beta-default",
++		},
++	}, nil).Times(1)
++
++	values := provider.GetAll("alpha", "beta", "missing", "from-env", "alpha")
++	require.Equal(t, map[string]string{
++		"alpha":    "configured-value",
++		"beta":     "beta-default",
++		"missing":  "fallback-value",
++		"from-env": "env-value",
++	}, values)
++}
++
++func TestGetAllFallsBackToClientList(t *testing.T) {
++	t.Parallel()
++	ctrl := gomock.NewController(t)
++	client := fake.NewMockNonNamespacedControllerInterface[*v3.Setting, *v3.SettingList](ctrl)
++	cache := fake.NewMockNonNamespacedCacheInterface[*v3.Setting](ctrl)
++	provider := settingsProvider{
++		settings:     client,
++		settingCache: cache,
++		fallback: map[string]string{
++			"missing": "fallback-value",
++		},
++	}
++
++	cache.EXPECT().List(gomock.Any()).Return(nil, errors.New("cache not ready")).Times(1)
++	client.EXPECT().List(gomock.Any()).Return(&v3.SettingList{Items: []v3.Setting{
++		{
++			ObjectMeta: metav1.ObjectMeta{Name: "beta"},
++			Default:    "beta-default",
++		},
++	}}, nil).Times(1)
++
++	values := provider.GetAll("beta", "missing")
++	require.Equal(t, map[string]string{
++		"beta":    "beta-default",
++		"missing": "fallback-value",
++	}, values)
++}
++
+ func storeOperations(store map[string]v3.Setting) (get, set, list) {
+ 	get := func(name string, opts metav1.GetOptions) (*v3.Setting, error) {
+ 		val, ok := store[name]
+diff --git a/pkg/settings/setting.go b/pkg/settings/setting.go
+index c219970b8..91627ef9f 100644
+--- a/pkg/settings/setting.go
++++ b/pkg/settings/setting.go
+@@ -499,6 +499,7 @@ func init() {
+ // but are not provided in SetAll call.
+ type Provider interface {
+ 	Get(name string) string
++	GetAll(names ...string) map[string]string
+ 	Set(name, value string) error
+ 	SetIfUnset(name, value string) error
+ 	SetAll(settings map[string]Setting) error
+@@ -547,6 +548,17 @@ func (s Setting) Get() string {
+ 	return provider.Get(s.Name)
+ }
+ 
++func GetValues(names ...string) map[string]string {
++	result := make(map[string]string, len(names))
++	if provider == nil {
++		for _, name := range names {
++			result[name] = settings[name].Default
++		}
++		return result
++	}
++	return provider.GetAll(names...)
++}
++
+ // GetDuration will return the currently stored value of the setting as a time.Duration.
+ // If the stored value is not a duration then the default value will be returned as a duration.
+ // If the default value is not a duration then the function will return 0
