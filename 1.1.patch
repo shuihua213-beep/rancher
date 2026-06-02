@@ -1,0 +1,176 @@
+diff --git a/pkg/auth/providers/azure/clients/group_cache.go b/pkg/auth/providers/azure/clients/group_cache.go
+index f14cb222a..ada1eef77 100644
+--- a/pkg/auth/providers/azure/clients/group_cache.go
++++ b/pkg/auth/providers/azure/clients/group_cache.go
+@@ -1,6 +1,7 @@
+ package clients
+ 
+ import (
++	"sync"
+ 	"time"
+ 
+ 	lru "github.com/hashicorp/golang-lru"
+@@ -16,6 +17,19 @@ type userPrincipalsClient interface {
+ 	GetGroup(id string) (v3.Principal, error)
+ }
+ 
++// inflightRequests tracks group IDs that are currently being fetched to prevent concurrent duplicates
++var (
++	inflightRequests = make(map[string]*requestPromise)
++	inflightMu       sync.Mutex
++)
++
++// requestPromise holds the result of an in-flight group fetch
++type requestPromise struct {
++	wg  sync.WaitGroup
++	val v3.Principal
++	err error
++}
++
+ // UserGroupsToPrincipals attempts to convert a value representing a collection of groups to a slice of principal values.
+ // It also stores group values in an in-memory cache for faster subsequent access.
+ func UserGroupsToPrincipals(azureClient userPrincipalsClient, groupNames []string) ([]v3.Principal, error) {
+@@ -44,6 +58,34 @@ func UserGroupsToPrincipals(azureClient userPrincipalsClient, groupNames []strin
+ 		}
+ 
+ 		tasksManager.Go(func() error {
++			// Check inflight requests first
++			inflightMu.Lock()
++			if promise, ok := inflightRequests[groupID]; ok {
++				inflightMu.Unlock()
++				// Wait for the in-flight request to complete
++				promise.wg.Wait()
++				if promise.err != nil {
++					logrus.Errorf("[AZURE_PROVIDER] Error getting group from in-flight request: %v", promise.err)
++					return promise.err
++				}
++				groupPrincipals[j] = promise.val
++				return nil
++			}
++
++			// Create a new promise for this group ID
++			promise := &requestPromise{}
++			promise.wg.Add(1)
++			inflightRequests[groupID] = promise
++			inflightMu.Unlock()
++
++			// Cleanup promise when done
++			defer func() {
++				inflightMu.Lock()
++				delete(inflightRequests, groupID)
++				inflightMu.Unlock()
++				promise.wg.Done()
++			}()
++
+ 			// This is inefficient for a collection of msgraph.Group. This is temporary - until support for Azure AD Graph is removed.
+ 			// The SDK for Microsoft Graph returns actual groups when queried for a user's group memberships.
+ 			// The SDK for Azure AD Graph returns group names as strings.
+@@ -52,10 +94,12 @@ func UserGroupsToPrincipals(azureClient userPrincipalsClient, groupNames []strin
+ 			groupObj, err := azureClient.GetGroup(groupID)
+ 			if err != nil {
+ 				logrus.Errorf("[AZURE_PROVIDER] Error getting group: %v", err)
++				promise.err = err
+ 				return err
+ 			}
+ 			groupObj.MemberOf = true
+ 
++			promise.val = groupObj
+ 			GroupCache.Add(groupID, groupObj)
+ 			groupPrincipals[j] = groupObj
+ 			return nil
+diff --git a/pkg/auth/providers/azure/clients/group_cache_test.go b/pkg/auth/providers/azure/clients/group_cache_test.go
+index 1d4a94fb8..e8e033e8c 100644
+--- a/pkg/auth/providers/azure/clients/group_cache_test.go
++++ b/pkg/auth/providers/azure/clients/group_cache_test.go
+@@ -1,7 +1,9 @@
+ package clients
+ 
+ import (
++	"sync"
+ 	"testing"
++	"time"
+ 
+ 	lru "github.com/hashicorp/golang-lru"
+ 	v3 "github.com/rancher/rancher/pkg/apis/management.cattle.io/v3"
+@@ -36,6 +38,48 @@ func TestUserGroupsToPrincipals(t *testing.T) {
+ 	assert.Equal(t, want, principals)
+ }
+ 
++func TestUserGroupsToPrincipals_ConcurrentRequestsDeduplication(t *testing.T) {
++	setupTestCache(t)
++	testGUID := "0f8fad5b-d9cb-469f-a165-70867728950e"
++
++	// Create a fake client that tracks how many times GetGroup is called
++	fc := &countingFakePrincipalsClient{
++		groups: map[string]fakeGroup{
++			testGUID: fakeGroup{id: ptr.To(testGUID)},
++		},
++		delay: 100 * time.Millisecond, // Add some delay to simulate real API
++	}
++
++	const concurrentRequests = 100
++
++	// Launch multiple concurrent requests for the same group
++	var wg sync.WaitGroup
++	results := make([][]v3.Principal, concurrentRequests)
++	errors := make([]error, concurrentRequests)
++
++	for i := 0; i < concurrentRequests; i++ {
++		wg.Add(1)
++		go func(idx int) {
++			defer wg.Done()
++			principals, err := UserGroupsToPrincipals(fc, []string{testGUID})
++			results[idx] = principals
++			errors[idx] = err
++		}(i)
++	}
++
++	wg.Wait()
++
++	// Verify all requests succeeded
++	for i := 0; i < concurrentRequests; i++ {
++		require.NoError(t, errors[i])
++		require.Len(t, results[i], 1)
++		assert.Equal(t, "azuread_group://"+testGUID, results[i][0].Name)
++	}
++
++	// Verify GetGroup was called only once
++	assert.Equal(t, 1, fc.getCallCount(), "Expected GetGroup to be called only once, but got %d calls", fc.getCallCount())
++}
++
+ type fakePrincipalsClient struct {
+ 	groups map[string]fakeGroup
+ }
+@@ -44,6 +88,32 @@ func (f *fakePrincipalsClient) GetGroup(id string) (v3.Principal, error) {
+ 	return groupToPrincipal(f.groups[id]), nil
+ }
+ 
++type countingFakePrincipalsClient struct {
++	groups    map[string]fakeGroup
++	callCount int
++	mu        sync.Mutex
++	delay     time.Duration
++}
++
++func (f *countingFakePrincipalsClient) GetGroup(id string) (v3.Principal, error) {
++	f.mu.Lock()
++	f.callCount++
++	f.mu.Unlock()
++
++	// Simulate API delay
++	if f.delay > 0 {
++		time.Sleep(f.delay)
++	}
++
++	return groupToPrincipal(f.groups[id]), nil
++}
++
++func (f *countingFakePrincipalsClient) getCallCount() int {
++	f.mu.Lock()
++	defer f.mu.Unlock()
++	return f.callCount
++}
++
+ type fakeGroup struct {
+ 	id          *string
+ 	displayName *string
