@@ -31,6 +31,8 @@ var (
 	settings       = map[string]Setting{}
 	provider       Provider
 	InjectDefaults string
+	cachedAll      map[string]string
+)
 
 	systemNamespaces = []string{
 		"kube-system",
@@ -499,6 +501,7 @@ func init() {
 // but are not provided in SetAll call.
 type Provider interface {
 	Get(name string) string
+	GetAll() map[string]string
 	Set(name, value string) error
 	SetIfUnset(name, value string) error
 	SetAll(settings map[string]Setting) error
@@ -518,6 +521,7 @@ type Setting struct {
 
 // SetIfUnset will store the given value of the setting if it was not already stored.
 func (s Setting) SetIfUnset(value string) error {
+	cachedAll = nil // Clear cache on set
 	if provider == nil {
 		return s.Set(value)
 	}
@@ -526,6 +530,7 @@ func (s Setting) SetIfUnset(value string) error {
 
 // Set will store the given value for the setting
 func (s Setting) Set(value string) error {
+	cachedAll = nil // Clear cache on set
 	if provider == nil {
 		s, ok := settings[s.Name]
 		if ok {
@@ -543,6 +548,11 @@ func (s Setting) Get() string {
 	if provider == nil {
 		s := settings[s.Name]
 		return s.Default
+	}
+	if cachedAll != nil {
+		if val, ok := cachedAll[s.Name]; ok {
+			return val
+		}
 	}
 	return provider.Get(s.Name)
 }
@@ -609,6 +619,7 @@ func SetProvider(p Provider) error {
 		return err
 	}
 	provider = p
+	cachedAll = nil // Clear cache on provider change
 	return nil
 }
 
@@ -662,7 +673,32 @@ func GetSettingByID(id string) string {
 		s := settings[id]
 		return s.Default
 	}
+	if cachedAll != nil {
+		if val, ok := cachedAll[id]; ok {
+			return val
+		}
+	}
 	return provider.Get(id)
+}
+
+// GetAllSettings returns all settings in a map.
+func GetAllSettings() map[string]string {
+	if provider == nil {
+		result := map[string]string{}
+		for name, setting := range settings {
+			result[name] = setting.Default
+		}
+		return result
+	}
+	if cachedAll == nil {
+		cachedAll = provider.GetAll()
+	}
+	// Return a copy to prevent external modifications
+	result := make(map[string]string, len(cachedAll))
+	for k, v := range cachedAll {
+		result[k] = v
+	}
+	return result
 }
 
 // DefaultAgentSettings will return a list of default agent settings

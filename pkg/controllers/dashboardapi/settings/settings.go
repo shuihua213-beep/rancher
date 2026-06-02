@@ -53,6 +53,38 @@ func (s *settingsProvider) Get(name string) string {
 	return obj.Value
 }
 
+func (s *settingsProvider) GetAll() map[string]string {
+	result := map[string]string{}
+
+	// First, collect all possible setting names from fallback (which was set during SetAll)
+	for name := range s.fallback {
+		if envValue := os.Getenv(settings.GetEnvKey(name)); envValue != "" {
+			result[name] = envValue
+			continue
+		}
+		result[name] = s.fallback[name]
+	}
+
+	// Now try to get all from cache to ensure we have latest values
+	list, err := s.settingCache.List("", nil)
+	if err == nil {
+		for _, obj := range list {
+			name := obj.Name
+			if envValue := os.Getenv(settings.GetEnvKey(name)); envValue != "" {
+				result[name] = envValue
+				continue
+			}
+			if obj.Value == "" {
+				result[name] = obj.Default
+			} else {
+				result[name] = obj.Value
+			}
+		}
+	}
+
+	return result
+}
+
 func (s *settingsProvider) Set(name, value string) error {
 	envValue := os.Getenv(settings.GetEnvKey(name))
 	if envValue != "" {

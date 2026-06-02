@@ -1,0 +1,159 @@
+diff --git a/pkg/api/steve/settings/settings.go b/pkg/api/steve/settings/settings.go
+index f4aea0fa6..23d09d1a1 100644
+--- a/pkg/api/steve/settings/settings.go
++++ b/pkg/api/steve/settings/settings.go
+@@ -6,10 +6,19 @@
+ 	steve "github.com/rancher/steve/pkg/server"
+ )
+ 
++type store struct {
++	types.Store
++}
++
+ func Register(server *steve.Server) {
+ 	server.SchemaFactory.AddTemplate(schema2.Template{
+ 		Group: "management.cattle.io",
+ 		Kind:  "Setting",
++		StoreFactory: func(innerStore types.Store) types.Store {
++			return &store{
++				Store: innerStore,
++			}
++		},
+ 		Formatter: func(request *types.APIRequest, resource *types.RawResource) {
+ 			data := resource.APIObject.Data()
+ 			if data.String("value") == "" {
+diff --git a/pkg/controllers/dashboardapi/settings/settings.go b/pkg/controllers/dashboardapi/settings/settings.go
+index 21a77574e..3181dfd03 100644
+--- a/pkg/controllers/dashboardapi/settings/settings.go
++++ b/pkg/controllers/dashboardapi/settings/settings.go
+@@ -53,6 +53,38 @@ func (s *settingsProvider) Get(name string) string {
+ 	return obj.Value
+ }
+ 
++func (s *settingsProvider) GetAll() map[string]string {
++	result := map[string]string{}
++
++	// First, collect all possible setting names from fallback (which was set during SetAll)
++	for name := range s.fallback {
++		if envValue := os.Getenv(settings.GetEnvKey(name)); envValue != "" {
++			result[name] = envValue
++			continue
++		}
++		result[name] = s.fallback[name]
++	}
++
++	// Now try to get all from cache to ensure we have latest values
++	list, err := s.settingCache.List("", nil)
++	if err == nil {
++		for _, obj := range list {
++			name := obj.Name
++			if envValue := os.Getenv(settings.GetEnvKey(name)); envValue != "" {
++				result[name] = envValue
++				continue
++			}
++			if obj.Value == "" {
++				result[name] = obj.Default
++			} else {
++				result[name] = obj.Value
++			}
++		}
++	}
++
++	return result
++}
++
+ func (s *settingsProvider) Set(name, value string) error {
+ 	envValue := os.Getenv(settings.GetEnvKey(name))
+ 	if envValue != "" {
+diff --git a/pkg/settings/setting.go b/pkg/settings/setting.go
+index c219970b8..aa463168a 100644
+--- a/pkg/settings/setting.go
++++ b/pkg/settings/setting.go
+@@ -31,6 +31,8 @@
+ 	settings       = map[string]Setting{}
+ 	provider       Provider
+ 	InjectDefaults string
++	cachedAll      map[string]string
++)
+ 
+ 	systemNamespaces = []string{
+ 		"kube-system",
+@@ -499,6 +501,7 @@ func init() {
+ // but are not provided in SetAll call.
+ type Provider interface {
+ 	Get(name string) string
++	GetAll() map[string]string
+ 	Set(name, value string) error
+ 	SetIfUnset(name, value string) error
+ 	SetAll(settings map[string]Setting) error
+@@ -518,6 +521,7 @@ type Setting struct {
+ 
+ // SetIfUnset will store the given value of the setting if it was not already stored.
+ func (s Setting) SetIfUnset(value string) error {
++	cachedAll = nil // Clear cache on set
+ 	if provider == nil {
+ 		return s.Set(value)
+ 	}
+@@ -526,6 +530,7 @@ func (s Setting) SetIfUnset(value string) error {
+ 
+ // Set will store the given value for the setting
+ func (s Setting) Set(value string) error {
++	cachedAll = nil // Clear cache on set
+ 	if provider == nil {
+ 		s, ok := settings[s.Name]
+ 		if ok {
+@@ -544,6 +549,11 @@ func (s Setting) Get() string {
+ 		s := settings[s.Name]
+ 		return s.Default
+ 	}
++	if cachedAll != nil {
++		if val, ok := cachedAll[s.Name]; ok {
++			return val
++		}
++	}
+ 	return provider.Get(s.Name)
+ }
+ 
+@@ -609,6 +619,7 @@ func SetProvider(p Provider) error {
+ 		return err
+ 	}
+ 	provider = p
++	cachedAll = nil // Clear cache on provider change
+ 	return nil
+ }
+ 
+@@ -662,9 +673,34 @@ func GetSettingByID(id string) string {
+ 		s := settings[id]
+ 		return s.Default
+ 	}
++	if cachedAll != nil {
++		if val, ok := cachedAll[id]; ok {
++			return val
++		}
++	}
+ 	return provider.Get(id)
+ }
+ 
++// GetAllSettings returns all settings in a map.
++func GetAllSettings() map[string]string {
++	if provider == nil {
++		result := map[string]string{}
++		for name, setting := range settings {
++			result[name] = setting.Default
++		}
++		return result
++	}
++	if cachedAll == nil {
++		cachedAll = provider.GetAll()
++	}
++	// Return a copy to prevent external modifications
++	result := make(map[string]string, len(cachedAll))
++	for k, v := range cachedAll {
++		result[k] = v
++	}
++	return result
++}
++
+ // DefaultAgentSettings will return a list of default agent settings
+ func DefaultAgentSettings() []Setting {
+ 	return []Setting{
