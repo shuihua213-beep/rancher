@@ -131,7 +131,7 @@ func (g *googleOauthProvider) loginUser(c context.Context, googleOAuthCredential
 	return userPrincipal, groupPrincipals, string(oauthToken), nil
 }
 
-func (g *googleOauthProvider) SearchPrincipals(searchKey, principalType string, token accessor.TokenAccessor) ([]apiv3.Principal, error) {
+func (g *googleOauthProvider) SearchPrincipals(searchKey, principalType string, token accessor.TokenAccessor, page, pageSize int64) ([]apiv3.Principal, error) {
 	var principals []apiv3.Principal
 	var err error
 
@@ -159,6 +159,23 @@ func (g *googleOauthProvider) SearchPrincipals(searchKey, principalType string, 
 		principals = append(principals, g.toPrincipal(acc.Type, acc, token))
 	}
 	logrus.Debugf("[Google OAuth] SearchPrincipals: Returning principals")
+
+	// Apply pagination if requested
+	if page > 0 && pageSize > 0 {
+		startIndex := int((page - 1) * pageSize)
+		endIndex := startIndex + int(pageSize)
+		
+		if startIndex >= len(principals) {
+			return []apiv3.Principal{}, nil
+		}
+		
+		if endIndex > len(principals) {
+			endIndex = len(principals)
+		}
+		
+		return principals[startIndex:endIndex], nil
+	}
+
 	return principals, nil
 }
 

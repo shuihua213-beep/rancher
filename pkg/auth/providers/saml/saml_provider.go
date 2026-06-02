@@ -372,9 +372,9 @@ func (s *Provider) CanRefreshPrincipals() bool { return s.name == ShibbolethName
 // Otherwise it returns a "fake" principal of a requested type with the name as the searchKey.
 // If the principalType is empty, both user and group principals are returned.
 // This is done because SAML, in the absence of LDAP, doesn't have a user/group lookup mechanism.
-func (s *Provider) SearchPrincipals(searchKey, principalType string, token accessor.TokenAccessor) ([]apiv3.Principal, error) {
+func (s *Provider) SearchPrincipals(searchKey, principalType string, token accessor.TokenAccessor, page, pageSize int64) ([]apiv3.Principal, error) {
 	if s.hasLdapGroupSearch() {
-		principals, err := s.ldapProvider.SearchPrincipals(searchKey, principalType, token)
+		principals, err := s.ldapProvider.SearchPrincipals(searchKey, principalType, token, page, pageSize)
 		// only give response from ldap if it's configured
 		if !ldap.IsNotConfigured(err) {
 			return principals, err
@@ -401,6 +401,22 @@ func (s *Provider) SearchPrincipals(searchKey, principalType string, token acces
 			PrincipalType: common.GroupPrincipalType,
 			Provider:      s.name,
 		})
+	}
+
+	// Apply pagination if requested
+	if page > 0 && pageSize > 0 {
+		startIndex := int((page - 1) * pageSize)
+		endIndex := startIndex + int(pageSize)
+		
+		if startIndex >= len(principals) {
+			return []apiv3.Principal{}, nil
+		}
+		
+		if endIndex > len(principals) {
+			endIndex = len(principals)
+		}
+		
+		return principals[startIndex:endIndex], nil
 	}
 
 	return principals, nil

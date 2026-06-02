@@ -29,7 +29,7 @@ const (
 type AuthProvider interface {
 	GetName() string
 	AuthenticateUser(w http.ResponseWriter, r *http.Request, input any) (v3.Principal, []v3.Principal, string, error)
-	SearchPrincipals(name, principalType string, myToken accessor.TokenAccessor) ([]v3.Principal, error)
+	SearchPrincipals(name, principalType string, myToken accessor.TokenAccessor, page, pageSize int64) ([]v3.Principal, error)
 	GetPrincipal(principalID string, token accessor.TokenAccessor) (v3.Principal, error)
 	CustomizeSchema(schema *types.Schema)
 	TransformToAuthProvider(authConfig map[string]any) (map[string]any, error)

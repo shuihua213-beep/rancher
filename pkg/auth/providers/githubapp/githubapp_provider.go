@@ -235,7 +235,7 @@ func (g *Provider) getGroupPrincipals(principalID string, config *apiv3.GithubAp
 // SearchPrincipals queries the app data matching on strings.
 //
 // The principalType can be user or group.
-func (g *Provider) SearchPrincipals(searchKey, principalType string, token accessor.TokenAccessor) ([]apiv3.Principal, error) {
+func (g *Provider) SearchPrincipals(searchKey, principalType string, token accessor.TokenAccessor, page, pageSize int64) ([]apiv3.Principal, error) {
 	config, err := g.getConfig()
 	if err != nil {
 		return nil, err
@@ -266,6 +266,22 @@ func (g *Provider) SearchPrincipals(searchKey, principalType string, token acces
 			p := g.toPrincipal(teamType, acct, token)
 			principals = append(principals, p)
 		}
+	}
+
+	// Apply pagination if requested
+	if page > 0 && pageSize > 0 {
+		startIndex := int((page - 1) * pageSize)
+		endIndex := startIndex + int(pageSize)
+		
+		if startIndex >= len(principals) {
+			return []apiv3.Principal{}, nil
+		}
+		
+		if endIndex > len(principals) {
+			endIndex = len(principals)
+		}
+		
+		return principals[startIndex:endIndex], nil
 	}
 
 	return principals, nil

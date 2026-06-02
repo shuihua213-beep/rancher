@@ -123,7 +123,7 @@ func (p *adProvider) AuthenticateUser(_ http.ResponseWriter, _ *http.Request, in
 	return principal, groupPrincipal, "", err
 }
 
-func (p *adProvider) SearchPrincipals(searchKey, principalType string, myToken accessor.TokenAccessor) ([]v3.Principal, error) {
+func (p *adProvider) SearchPrincipals(searchKey, principalType string, myToken accessor.TokenAccessor, page, pageSize int64) ([]v3.Principal, error) {
 	var principals []v3.Principal
 	var err error
 
@@ -138,7 +138,7 @@ func (p *adProvider) SearchPrincipals(searchKey, principalType string, myToken a
 	}
 	defer lConn.Close()
 
-	principals, err = p.searchPrincipals(searchKey, principalType, config, lConn)
+	principals, err = p.searchPrincipals(searchKey, principalType, config, lConn, page, pageSize)
 	if err == nil {
 		for _, principal := range principals {
 			if principal.PrincipalType == "user" {

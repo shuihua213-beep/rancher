@@ -1,0 +1,621 @@
+diff --git a/pkg/apis/management.cattle.io/v3/authn_types.go b/pkg/apis/management.cattle.io/v3/authn_types.go
+index f75dde7f7..1c58fa12f 100644
+--- a/pkg/apis/management.cattle.io/v3/authn_types.go
++++ b/pkg/apis/management.cattle.io/v3/authn_types.go
+@@ -275,6 +275,8 @@ type Principal struct {
+ type SearchPrincipalsInput struct {
+ 	Name          string `json:"name" norman:"type=string,required,notnullable"`
+ 	PrincipalType string `json:"principalType,omitempty" norman:"type=enum,options=user|group"`
++	Page          int64  `json:"page,omitempty" norman:"type=int"`
++	PageSize      int64  `json:"pageSize,omitempty" norman:"type=int"`
+ }
+ 
+ type ChangePasswordInput struct {
+diff --git a/pkg/auth/principals/handler.go b/pkg/auth/principals/handler.go
+index 213522ef8..32ec87128 100644
+--- a/pkg/auth/principals/handler.go
++++ b/pkg/auth/principals/handler.go
+@@ -51,7 +51,7 @@ func (h *principalsHandler) actions(actionName string, action *types.Action, api
+ 		return err
+ 	}
+ 
+-	ps, err := providers.SearchPrincipals(input.Name, input.PrincipalType, token)
++	ps, err := providers.SearchPrincipals(input.Name, input.PrincipalType, token, input.Page, input.PageSize)
+ 	if err != nil {
+ 		return err
+ 	}
+diff --git a/pkg/auth/providers/activedirectory/activedirectory_client.go b/pkg/auth/providers/activedirectory/activedirectory_client.go
+index 471d35ceb..45c225c1f 100644
+--- a/pkg/auth/providers/activedirectory/activedirectory_client.go
++++ b/pkg/auth/providers/activedirectory/activedirectory_client.go
+@@ -415,11 +415,11 @@ func (p *adProvider) getPrincipal(distinguishedName string, scope string, config
+ 	return principal, nil
+ }
+ 
+-func (p *adProvider) searchPrincipals(name, principalType string, config *v3.ActiveDirectoryConfig, lConn *ldapv3.Conn) ([]v3.Principal, error) {
++func (p *adProvider) searchPrincipals(name, principalType string, config *v3.ActiveDirectoryConfig, lConn *ldapv3.Conn, page, pageSize int64) ([]v3.Principal, error) {
+ 	var principals []v3.Principal
+ 
+ 	if principalType == "" || principalType == "user" {
+-		userPrincipals, err := p.searchUser(name, config, lConn)
++		userPrincipals, err := p.searchUser(name, config, lConn, page, pageSize)
+ 		if err != nil {
+ 			return nil, err
+ 		}
+@@ -427,7 +427,7 @@ func (p *adProvider) searchPrincipals(name, principalType string, config *v3.Act
+ 	}
+ 
+ 	if principalType == "" || principalType == "group" {
+-		groupPrincipals, err := p.searchGroup(name, config, lConn)
++		groupPrincipals, err := p.searchGroup(name, config, lConn, page, pageSize)
+ 		if err != nil {
+ 			return nil, err
+ 		}
+@@ -437,7 +437,7 @@ func (p *adProvider) searchPrincipals(name, principalType string, config *v3.Act
+ 	return principals, nil
+ }
+ 
+-func (p *adProvider) searchUser(name string, config *v3.ActiveDirectoryConfig, lConn *ldapv3.Conn) ([]v3.Principal, error) {
++func (p *adProvider) searchUser(name string, config *v3.ActiveDirectoryConfig, lConn *ldapv3.Conn, page, pageSize int64) ([]v3.Principal, error) {
+ 	if config.UserSearchFilter != "" {
+ 		// Make sure user search filter contains a valid LDAP query expression
+ 		// before interpolating it into the search filter.
+@@ -456,10 +456,10 @@ func (p *adProvider) searchUser(name string, config *v3.ActiveDirectoryConfig, l
+ 	query += srchAttrs + ")" + config.UserSearchFilter + ")"
+ 
+ 	logrus.Debugf("LDAPProvider searchUser query: %s", query)
+-	return p.searchLdap(query, UserScope, config, lConn)
++	return p.searchLdap(query, UserScope, config, lConn, page, pageSize)
+ }
+ 
+-func (p *adProvider) searchGroup(name string, config *v3.ActiveDirectoryConfig, lConn *ldapv3.Conn) ([]v3.Principal, error) {
++func (p *adProvider) searchGroup(name string, config *v3.ActiveDirectoryConfig, lConn *ldapv3.Conn, page, pageSize int64) ([]v3.Principal, error) {
+ 	if config.GroupSearchFilter != "" {
+ 		// Make sure group search filter contains a valid LDAP query expression
+ 		// before interpolating it into the search filter.
+@@ -479,10 +479,10 @@ func (p *adProvider) searchGroup(name string, config *v3.ActiveDirectoryConfig,
+ 	)
+ 
+ 	logrus.Debugf("LDAPProvider searchGroup query: %s", query)
+-	return p.searchLdap(query, GroupScope, config, lConn)
++	return p.searchLdap(query, GroupScope, config, lConn, page, pageSize)
+ }
+ 
+-func (p *adProvider) searchLdap(query string, scope string, config *v3.ActiveDirectoryConfig, lConn *ldapv3.Conn) ([]v3.Principal, error) {
++func (p *adProvider) searchLdap(query string, scope string, config *v3.ActiveDirectoryConfig, lConn *ldapv3.Conn, page, pageSize int64) ([]v3.Principal, error) {
+ 	var principals []v3.Principal
+ 	var search *ldapv3.SearchRequest
+ 
+@@ -529,6 +529,22 @@ func (p *adProvider) searchLdap(query string, scope string, config *v3.ActiveDir
+ 		principals = append(principals, *principal)
+ 	}
+ 
++	// Apply pagination if requested
++	if page > 0 && pageSize > 0 {
++		startIndex := int((page - 1) * pageSize)
++		endIndex := startIndex + int(pageSize)
++		
++		if startIndex >= len(principals) {
++			return []v3.Principal{}, nil
++		}
++		
++		if endIndex > len(principals) {
++			endIndex = len(principals)
++		}
++		
++		return principals[startIndex:endIndex], nil
++	}
++
+ 	return principals, nil
+ }
+ 
+diff --git a/pkg/auth/providers/activedirectory/activedirectory_provider.go b/pkg/auth/providers/activedirectory/activedirectory_provider.go
+index 129355fcd..6a39f91c0 100644
+--- a/pkg/auth/providers/activedirectory/activedirectory_provider.go
++++ b/pkg/auth/providers/activedirectory/activedirectory_provider.go
+@@ -123,7 +123,7 @@ func (p *adProvider) AuthenticateUser(_ http.ResponseWriter, _ *http.Request, in
+ 	return principal, groupPrincipal, "", err
+ }
+ 
+-func (p *adProvider) SearchPrincipals(searchKey, principalType string, myToken accessor.TokenAccessor) ([]v3.Principal, error) {
++func (p *adProvider) SearchPrincipals(searchKey, principalType string, myToken accessor.TokenAccessor, page, pageSize int64) ([]v3.Principal, error) {
+ 	var principals []v3.Principal
+ 	var err error
+ 
+@@ -138,7 +138,7 @@ func (p *adProvider) SearchPrincipals(searchKey, principalType string, myToken a
+ 	}
+ 	defer lConn.Close()
+ 
+-	principals, err = p.searchPrincipals(searchKey, principalType, config, lConn)
++	principals, err = p.searchPrincipals(searchKey, principalType, config, lConn, page, pageSize)
+ 	if err == nil {
+ 		for _, principal := range principals {
+ 			if principal.PrincipalType == "user" {
+diff --git a/pkg/auth/providers/azure/azure_provider.go b/pkg/auth/providers/azure/azure_provider.go
+index 9bb3c9309..df99aa86f 100644
+--- a/pkg/auth/providers/azure/azure_provider.go
++++ b/pkg/auth/providers/azure/azure_provider.go
+@@ -199,7 +199,7 @@ func (ap *Provider) RefetchGroupPrincipals(principalID, secret string) ([]apiv3.
+ func (ap *Provider) UsesUserSecrets() bool      { return false }
+ func (ap *Provider) CanRefreshPrincipals() bool { return true }
+ 
+-func (ap *Provider) SearchPrincipals(name, principalType string, token accessor.TokenAccessor) ([]apiv3.Principal, error) {
++func (ap *Provider) SearchPrincipals(name, principalType string, token accessor.TokenAccessor, page, pageSize int64) ([]apiv3.Principal, error) {
+ 	cfg, err := ap.GetAzureConfigK8s()
+ 	if err != nil {
+ 		return nil, err
+@@ -235,6 +235,22 @@ func (ap *Provider) SearchPrincipals(name, principalType string, token accessor.
+ 		principals = append(principals, groups...)
+ 	}
+ 
++	// Apply pagination if requested
++	if page > 0 && pageSize > 0 {
++		startIndex := int((page - 1) * pageSize)
++		endIndex := startIndex + int(pageSize)
++		
++		if startIndex >= len(principals) {
++			return []apiv3.Principal{}, nil
++		}
++		
++		if endIndex > len(principals) {
++			endIndex = len(principals)
++		}
++		
++		return principals[startIndex:endIndex], nil
++	}
++
+ 	return principals, nil
+ }
+ 
+diff --git a/pkg/auth/providers/common/provider.go b/pkg/auth/providers/common/provider.go
+index 2a9320187..5c73a6f41 100644
+--- a/pkg/auth/providers/common/provider.go
++++ b/pkg/auth/providers/common/provider.go
+@@ -29,7 +29,7 @@
+ type AuthProvider interface {
+ 	GetName() string
+ 	AuthenticateUser(w http.ResponseWriter, r *http.Request, input any) (v3.Principal, []v3.Principal, string, error)
+-	SearchPrincipals(name, principalType string, myToken accessor.TokenAccessor) ([]v3.Principal, error)
++	SearchPrincipals(name, principalType string, myToken accessor.TokenAccessor, page, pageSize int64) ([]v3.Principal, error)
+ 	GetPrincipal(principalID string, token accessor.TokenAccessor) (v3.Principal, error)
+ 	CustomizeSchema(schema *types.Schema)
+ 	TransformToAuthProvider(authConfig map[string]any) (map[string]any, error)
+diff --git a/pkg/auth/providers/genericoidc/genericoidc_provider.go b/pkg/auth/providers/genericoidc/genericoidc_provider.go
+index 3082ec5bd..86db08f63 100644
+--- a/pkg/auth/providers/genericoidc/genericoidc_provider.go
++++ b/pkg/auth/providers/genericoidc/genericoidc_provider.go
+@@ -53,7 +53,7 @@ func (g *GenOIDCProvider) GetName() string {
+ // that matches the searchValue.  If principalType is empty, both a user principal and a group principal will
+ // be returned.  This is done because OIDC does not have a proper lookup mechanism.  In order
+ // to provide some degree of functionality that allows manual entry for users/groups, this is the compromise.
+-func (g *GenOIDCProvider) SearchPrincipals(searchValue, principalType string, _ accessor.TokenAccessor) ([]apiv3.Principal, error) {
++func (g *GenOIDCProvider) SearchPrincipals(searchValue, principalType string, _ accessor.TokenAccessor, page, pageSize int64) ([]apiv3.Principal, error) {
+ 	var principals []apiv3.Principal
+ 
+ 	if principalType != GroupType {
+@@ -76,6 +76,23 @@ func (g *GenOIDCProvider) SearchPrincipals(searchValue, principalType string, _
+ 		}
+ 		principals = append(principals, gp)
+ 	}
++
++	// Apply pagination if requested
++	if page > 0 && pageSize > 0 {
++		startIndex := int((page - 1) * pageSize)
++		endIndex := startIndex + int(pageSize)
++		
++		if startIndex >= len(principals) {
++			return []apiv3.Principal{}, nil
++		}
++		
++		if endIndex > len(principals) {
++			endIndex = len(principals)
++		}
++		
++		return principals[startIndex:endIndex], nil
++	}
++
+ 	return principals, nil
+ }
+ 
+diff --git a/pkg/auth/providers/github/github_provider.go b/pkg/auth/providers/github/github_provider.go
+index c871ebf40..c9c5b3f8e 100644
+--- a/pkg/auth/providers/github/github_provider.go
++++ b/pkg/auth/providers/github/github_provider.go
+@@ -275,7 +275,7 @@ func (g *Provider) RefetchGroupPrincipals(principalID string, secret string) ([]
+ func (g *Provider) UsesUserSecrets() bool      { return true }
+ func (g *Provider) CanRefreshPrincipals() bool { return true }
+ 
+-func (g *Provider) SearchPrincipals(searchKey, principalType string, token accessor.TokenAccessor) ([]apiv3.Principal, error) {
++func (g *Provider) SearchPrincipals(searchKey, principalType string, token accessor.TokenAccessor, page, pageSize int64) ([]apiv3.Principal, error) {
+ 	var principals []apiv3.Principal
+ 	var err error
+ 
+@@ -319,6 +319,22 @@ func (g *Provider) SearchPrincipals(searchKey, principalType string, token acces
+ 		}
+ 	}
+ 
++	// Apply pagination if requested
++	if page > 0 && pageSize > 0 {
++		startIndex := int((page - 1) * pageSize)
++		endIndex := startIndex + int(pageSize)
++		
++		if startIndex >= len(principals) {
++			return []apiv3.Principal{}, nil
++		}
++		
++		if endIndex > len(principals) {
++			endIndex = len(principals)
++		}
++		
++		return principals[startIndex:endIndex], nil
++	}
++
+ 	return principals, nil
+ }
+ 
+diff --git a/pkg/auth/providers/githubapp/githubapp_provider.go b/pkg/auth/providers/githubapp/githubapp_provider.go
+index 01b3ef3d1..1df69a60d 100644
+--- a/pkg/auth/providers/githubapp/githubapp_provider.go
++++ b/pkg/auth/providers/githubapp/githubapp_provider.go
+@@ -235,7 +235,7 @@ func (g *Provider) getGroupPrincipals(principalID string, config *apiv3.GithubAp
+ // SearchPrincipals queries the app data matching on strings.
+ //
+ // The principalType can be user or group.
+-func (g *Provider) SearchPrincipals(searchKey, principalType string, token accessor.TokenAccessor) ([]apiv3.Principal, error) {
++func (g *Provider) SearchPrincipals(searchKey, principalType string, token accessor.TokenAccessor, page, pageSize int64) ([]apiv3.Principal, error) {
+ 	config, err := g.getConfig()
+ 	if err != nil {
+ 		return nil, err
+@@ -268,6 +268,22 @@ func (g *Provider) SearchPrincipals(searchKey, principalType string, token acces
+ 		}
+ 	}
+ 
++	// Apply pagination if requested
++	if page > 0 && pageSize > 0 {
++		startIndex := int((page - 1) * pageSize)
++		endIndex := startIndex + int(pageSize)
++		
++		if startIndex >= len(principals) {
++			return []apiv3.Principal{}, nil
++		}
++		
++		if endIndex > len(principals) {
++			endIndex = len(principals)
++		}
++		
++		return principals[startIndex:endIndex], nil
++	}
++
+ 	return principals, nil
+ }
+ 
+diff --git a/pkg/auth/providers/googleoauth/goauth_provider.go b/pkg/auth/providers/googleoauth/goauth_provider.go
+index 1af860844..0ef5e39a7 100644
+--- a/pkg/auth/providers/googleoauth/goauth_provider.go
++++ b/pkg/auth/providers/googleoauth/goauth_provider.go
+@@ -131,7 +131,7 @@ func (g *googleOauthProvider) loginUser(c context.Context, googleOAuthCredential
+ 	return userPrincipal, groupPrincipals, string(oauthToken), nil
+ }
+ 
+-func (g *googleOauthProvider) SearchPrincipals(searchKey, principalType string, token accessor.TokenAccessor) ([]apiv3.Principal, error) {
++func (g *googleOauthProvider) SearchPrincipals(searchKey, principalType string, token accessor.TokenAccessor, page, pageSize int64) ([]apiv3.Principal, error) {
+ 	var principals []apiv3.Principal
+ 	var err error
+ 
+@@ -159,6 +159,23 @@ func (g *googleOauthProvider) SearchPrincipals(searchKey, principalType string,
+ 		principals = append(principals, g.toPrincipal(acc.Type, acc, token))
+ 	}
+ 	logrus.Debugf("[Google OAuth] SearchPrincipals: Returning principals")
++
++	// Apply pagination if requested
++	if page > 0 && pageSize > 0 {
++		startIndex := int((page - 1) * pageSize)
++		endIndex := startIndex + int(pageSize)
++		
++		if startIndex >= len(principals) {
++			return []apiv3.Principal{}, nil
++		}
++		
++		if endIndex > len(principals) {
++			endIndex = len(principals)
++		}
++		
++		return principals[startIndex:endIndex], nil
++	}
++
+ 	return principals, nil
+ }
+ 
+diff --git a/pkg/auth/providers/keycloakoidc/keycloak_provider.go b/pkg/auth/providers/keycloakoidc/keycloak_provider.go
+index c7e847890..2bdee2de9 100644
+--- a/pkg/auth/providers/keycloakoidc/keycloak_provider.go
++++ b/pkg/auth/providers/keycloakoidc/keycloak_provider.go
+@@ -91,7 +91,7 @@ func (k *keyCloakOIDCProvider) newClient(config *apiv3.OIDCConfig, token accesso
+ 	return keyCloakClient, err
+ }
+ 
+-func (k *keyCloakOIDCProvider) SearchPrincipals(searchValue, principalType string, token accessor.TokenAccessor) ([]apiv3.Principal, error) {
++func (k *keyCloakOIDCProvider) SearchPrincipals(searchValue, principalType string, token accessor.TokenAccessor, page, pageSize int64) ([]apiv3.Principal, error) {
+ 	var principals []apiv3.Principal
+ 	var err error
+ 
+@@ -113,6 +113,23 @@ func (k *keyCloakOIDCProvider) SearchPrincipals(searchValue, principalType strin
+ 		p := k.toPrincipal(acct.Type, acct, token)
+ 		principals = append(principals, p)
+ 	}
++
++	// Apply pagination if requested
++	if page > 0 && pageSize > 0 {
++		startIndex := int((page - 1) * pageSize)
++		endIndex := startIndex + int(pageSize)
++		
++		if startIndex >= len(principals) {
++			return []apiv3.Principal{}, nil
++		}
++		
++		if endIndex > len(principals) {
++			endIndex = len(principals)
++		}
++		
++		return principals[startIndex:endIndex], nil
++	}
++
+ 	return principals, nil
+ }
+ 
+diff --git a/pkg/auth/providers/ldap/ldap_client.go b/pkg/auth/providers/ldap/ldap_client.go
+index ed6caea6c..550692e32 100644
+--- a/pkg/auth/providers/ldap/ldap_client.go
++++ b/pkg/auth/providers/ldap/ldap_client.go
+@@ -364,11 +364,11 @@ func (p *ldapProvider) getPrincipal(distinguishedName string, scope string, conf
+ 	return principal, nil
+ }
+ 
+-func (p *ldapProvider) searchPrincipals(name, principalType string, config *v3.LdapConfig, lConn ldapv3.Client) ([]v3.Principal, error) {
++func (p *ldapProvider) searchPrincipals(name, principalType string, config *v3.LdapConfig, lConn ldapv3.Client, page, pageSize int64) ([]v3.Principal, error) {
+ 	var principals []v3.Principal
+ 
+ 	if principalType == "" || principalType == "user" {
+-		userPrincipals, err := p.searchUser(name, config, lConn)
++		userPrincipals, err := p.searchUser(name, config, lConn, page, pageSize)
+ 		if err != nil {
+ 			return nil, err
+ 		}
+@@ -376,7 +376,7 @@ func (p *ldapProvider) searchPrincipals(name, principalType string, config *v3.L
+ 	}
+ 
+ 	if principalType == "" || principalType == "group" {
+-		groupPrincipals, err := p.searchGroup(name, config, lConn)
++		groupPrincipals, err := p.searchGroup(name, config, lConn, page, pageSize)
+ 		if err != nil {
+ 			return nil, err
+ 		}
+@@ -386,7 +386,7 @@ func (p *ldapProvider) searchPrincipals(name, principalType string, config *v3.L
+ 	return principals, nil
+ }
+ 
+-func (p *ldapProvider) searchUser(name string, config *v3.LdapConfig, lConn ldapv3.Client) ([]v3.Principal, error) {
++func (p *ldapProvider) searchUser(name string, config *v3.LdapConfig, lConn ldapv3.Client, page, pageSize int64) ([]v3.Principal, error) {
+ 	if config.UserSearchFilter != "" {
+ 		// Make sure user search filter contains a valid LDAP query expression
+ 		// before interpolating it into the search filter.
+@@ -410,10 +410,10 @@ func (p *ldapProvider) searchUser(name string, config *v3.LdapConfig, lConn ldap
+ 	// and is expected to follow ldap syntax and enclosed in parentheses.
+ 	query += srchAttrs + ")" + config.UserSearchFilter + ")"
+ 	logrus.Debugf("%s searchUser query: %s", p.providerName, query)
+-	return p.searchLdap(query, p.userScope, config, lConn)
++	return p.searchLdap(query, p.userScope, config, lConn, page, pageSize)
+ }
+ 
+-func (p *ldapProvider) searchGroup(name string, config *v3.LdapConfig, lConn ldapv3.Client) ([]v3.Principal, error) {
++func (p *ldapProvider) searchGroup(name string, config *v3.LdapConfig, lConn ldapv3.Client, page, pageSize int64) ([]v3.Principal, error) {
+ 	if config.GroupSearchFilter != "" {
+ 		// Make sure group search filter contains a valid LDAP query expression
+ 		// before interpolating it into the search filter.
+@@ -437,10 +437,10 @@ func (p *ldapProvider) searchGroup(name string, config *v3.LdapConfig, lConn lda
+ 	)
+ 
+ 	logrus.Debugf("%s searchGroup query: %s scope: %s", p.providerName, query, p.groupScope)
+-	return p.searchLdap(query, p.groupScope, config, lConn)
++	return p.searchLdap(query, p.groupScope, config, lConn, page, pageSize)
+ }
+ 
+-func (p *ldapProvider) searchLdap(query string, scope string, config *v3.LdapConfig, lConn ldapv3.Client) ([]v3.Principal, error) {
++func (p *ldapProvider) searchLdap(query string, scope string, config *v3.LdapConfig, lConn ldapv3.Client, page, pageSize int64) ([]v3.Principal, error) {
+ 	var principals []v3.Principal
+ 	var search *ldapv3.SearchRequest
+ 
+@@ -512,6 +512,22 @@ func (p *ldapProvider) searchLdap(query string, scope string, config *v3.LdapCon
+ 		principals = append(principals, *principal)
+ 	}
+ 
++	// Apply pagination if requested
++	if page > 0 && pageSize > 0 {
++		startIndex := int((page - 1) * pageSize)
++		endIndex := startIndex + int(pageSize)
++		
++		if startIndex >= len(principals) {
++			return []v3.Principal{}, nil
++		}
++		
++		if endIndex > len(principals) {
++			endIndex = len(principals)
++		}
++		
++		return principals[startIndex:endIndex], nil
++	}
++
+ 	return principals, nil
+ }
+ 
+diff --git a/pkg/auth/providers/ldap/ldap_provider.go b/pkg/auth/providers/ldap/ldap_provider.go
+index d2e87c964..df4717082 100644
+--- a/pkg/auth/providers/ldap/ldap_provider.go
++++ b/pkg/auth/providers/ldap/ldap_provider.go
+@@ -164,7 +164,7 @@ func (p *ldapProvider) AuthenticateUser(_ http.ResponseWriter, _ *http.Request,
+ }
+ 
+ // searchKey can be user PrincipalID e.g. shibboleth_user://username with principalType of group for group search by user
+-func (p *ldapProvider) SearchPrincipals(searchKey, principalType string, myToken accessor.TokenAccessor) ([]v3.Principal, error) {
++func (p *ldapProvider) SearchPrincipals(searchKey, principalType string, myToken accessor.TokenAccessor, page, pageSize int64) ([]v3.Principal, error) {
+ 	var principals []v3.Principal
+ 	var err error
+ 
+@@ -184,7 +184,7 @@ func (p *ldapProvider) SearchPrincipals(searchKey, principalType string, myToken
+ 	}
+ 	defer lConn.Close()
+ 
+-	principals, err = p.searchPrincipals(searchKey, principalType, config, lConn)
++	principals, err = p.searchPrincipals(searchKey, principalType, config, lConn, page, pageSize)
+ 	if err == nil {
+ 		for _, principal := range principals {
+ 			switch principal.PrincipalType {
+diff --git a/pkg/auth/providers/local/local_auth_provider.go b/pkg/auth/providers/local/local_auth_provider.go
+index 101e05b3a..151416b7b 100644
+--- a/pkg/auth/providers/local/local_auth_provider.go
++++ b/pkg/auth/providers/local/local_auth_provider.go
+@@ -215,13 +215,13 @@ func (l *Provider) RefetchGroupPrincipals(principalID string, secret string) ([]
+ 	return l.getGroupPrincipals(user)
+ }
+ 
+-func (l *Provider) SearchPrincipals(searchKey, principalType string, token accessor.TokenAccessor) ([]apiv3.Principal, error) {
+-	return l.SearchPrincipalsDedupe(searchKey, principalType, token, nil)
++func (l *Provider) SearchPrincipals(searchKey, principalType string, token accessor.TokenAccessor, page, pageSize int64) ([]apiv3.Principal, error) {
++	return l.SearchPrincipalsDedupe(searchKey, principalType, token, nil, page, pageSize)
+ }
+ 
+ // SearchPrincipalsDedupe performs principal search, but deduplicates the results against the supplied list (that should have come from other non-local auth providers)
+ // This is to avoid getting duplicate search results
+-func (l *Provider) SearchPrincipalsDedupe(searchKey, principalType string, token accessor.TokenAccessor, principalsFromOtherProviders []apiv3.Principal) ([]apiv3.Principal, error) {
++func (l *Provider) SearchPrincipalsDedupe(searchKey, principalType string, token accessor.TokenAccessor, principalsFromOtherProviders []apiv3.Principal, page, pageSize int64) ([]apiv3.Principal, error) {
+ 	fromOtherProviders := map[string]bool{}
+ 	for _, p := range principalsFromOtherProviders {
+ 		fromOtherProviders[p.Name] = true
+@@ -264,6 +264,22 @@ func (l *Provider) SearchPrincipalsDedupe(searchKey, principalType string, token
+ 		}
+ 	}
+ 
++	// Apply pagination if requested
++	if page > 0 && pageSize > 0 {
++		startIndex := int((page - 1) * pageSize)
++		endIndex := startIndex + int(pageSize)
++		
++		if startIndex >= len(principals) {
++			return []apiv3.Principal{}, nil
++		}
++		
++		if endIndex > len(principals) {
++			endIndex = len(principals)
++		}
++		
++		return principals[startIndex:endIndex], nil
++	}
++
+ 	return principals, nil
+ }
+ 
+diff --git a/pkg/auth/providers/oidc/oidc_provider.go b/pkg/auth/providers/oidc/oidc_provider.go
+index 61ccb8a71..a36443736 100644
+--- a/pkg/auth/providers/oidc/oidc_provider.go
++++ b/pkg/auth/providers/oidc/oidc_provider.go
+@@ -150,7 +150,7 @@ func (o *OpenIDCProvider) LoginUser(w http.ResponseWriter, req *http.Request, oa
+ 	return userPrincipal, groupPrincipals, string(oauthToken), userClaimInfo, err
+ }
+ 
+-func (o *OpenIDCProvider) SearchPrincipals(searchValue, principalType string, token accessor.TokenAccessor) ([]apiv3.Principal, error) {
++func (o *OpenIDCProvider) SearchPrincipals(searchValue, principalType string, token accessor.TokenAccessor, page, pageSize int64) ([]apiv3.Principal, error) {
+ 	var principals []apiv3.Principal
+ 
+ 	if principalType == "" {
+@@ -166,6 +166,23 @@ func (o *OpenIDCProvider) SearchPrincipals(searchValue, principalType string, to
+ 	}
+ 
+ 	principals = append(principals, p)
++
++	// Apply pagination if requested
++	if page > 0 && pageSize > 0 {
++		startIndex := int((page - 1) * pageSize)
++		endIndex := startIndex + int(pageSize)
++		
++		if startIndex >= len(principals) {
++			return []apiv3.Principal{}, nil
++		}
++		
++		if endIndex > len(principals) {
++			endIndex = len(principals)
++		}
++		
++		return principals[startIndex:endIndex], nil
++	}
++
+ 	return principals, nil
+ }
+ 
+diff --git a/pkg/auth/providers/providers.go b/pkg/auth/providers/providers.go
+index 69a85ee16..48779d43a 100644
+--- a/pkg/auth/providers/providers.go
++++ b/pkg/auth/providers/providers.go
+@@ -172,7 +172,7 @@ func GetPrincipal(principalID string, myToken accessor.TokenAccessor) (apiv3.Pri
+ }
+ 
+ // SearchPrincipals searches for principals by name using the token's auth provider, appending deduplicated local results.
+-func SearchPrincipals(name, principalType string, myToken accessor.TokenAccessor) ([]apiv3.Principal, error) {
++func SearchPrincipals(name, principalType string, myToken accessor.TokenAccessor, page, pageSize int64) ([]apiv3.Principal, error) {
+ 	ap := myToken.GetAuthProvider()
+ 	if ap == "" {
+ 		return []apiv3.Principal{}, fmt.Errorf("[SearchPrincipals] no authProvider specified in token")
+@@ -186,13 +186,13 @@ func SearchPrincipals(name, principalType string, myToken accessor.TokenAccessor
+ 	if p == nil {
+ 		return []apiv3.Principal{}, fmt.Errorf("[SearchPrincipals] authProvider %v not initialized", ap)
+ 	}
+-	principals, err := p.SearchPrincipals(name, principalType, myToken)
++	principals, err := p.SearchPrincipals(name, principalType, myToken, page, pageSize)
+ 	if err != nil {
+ 		return principals, err
+ 	}
+ 	if ap != local.Name {
+ 		if lpDedupe, _ := lp.(*local.Provider); lpDedupe != nil {
+-			localPrincipals, err := lpDedupe.SearchPrincipalsDedupe(name, principalType, myToken, principals)
++			localPrincipals, err := lpDedupe.SearchPrincipalsDedupe(name, principalType, myToken, principals, page, pageSize)
+ 			if err != nil {
+ 				return principals, err
+ 			}
+diff --git a/pkg/auth/providers/saml/saml_provider.go b/pkg/auth/providers/saml/saml_provider.go
+index 1b38acfea..dbd6e3af0 100644
+--- a/pkg/auth/providers/saml/saml_provider.go
++++ b/pkg/auth/providers/saml/saml_provider.go
+@@ -372,9 +372,9 @@ func (s *Provider) CanRefreshPrincipals() bool { return s.name == ShibbolethName
+ // Otherwise it returns a "fake" principal of a requested type with the name as the searchKey.
+ // If the principalType is empty, both user and group principals are returned.
+ // This is done because SAML, in the absence of LDAP, doesn't have a user/group lookup mechanism.
+-func (s *Provider) SearchPrincipals(searchKey, principalType string, token accessor.TokenAccessor) ([]apiv3.Principal, error) {
++func (s *Provider) SearchPrincipals(searchKey, principalType string, token accessor.TokenAccessor, page, pageSize int64) ([]apiv3.Principal, error) {
+ 	if s.hasLdapGroupSearch() {
+-		principals, err := s.ldapProvider.SearchPrincipals(searchKey, principalType, token)
++		principals, err := s.ldapProvider.SearchPrincipals(searchKey, principalType, token, page, pageSize)
+ 		// only give response from ldap if it's configured
+ 		if !ldap.IsNotConfigured(err) {
+ 			return principals, err
+@@ -403,6 +403,22 @@ func (s *Provider) SearchPrincipals(searchKey, principalType string, token acces
+ 		})
+ 	}
+ 
++	// Apply pagination if requested
++	if page > 0 && pageSize > 0 {
++		startIndex := int((page - 1) * pageSize)
++		endIndex := startIndex + int(pageSize)
++		
++		if startIndex >= len(principals) {
++			return []apiv3.Principal{}, nil
++		}
++		
++		if endIndex > len(principals) {
++			endIndex = len(principals)
++		}
++		
++		return principals[startIndex:endIndex], nil
++	}
++
+ 	return principals, nil
+ }
+ 

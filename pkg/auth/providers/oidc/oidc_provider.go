@@ -150,7 +150,7 @@ func (o *OpenIDCProvider) LoginUser(w http.ResponseWriter, req *http.Request, oa
 	return userPrincipal, groupPrincipals, string(oauthToken), userClaimInfo, err
 }
 
-func (o *OpenIDCProvider) SearchPrincipals(searchValue, principalType string, token accessor.TokenAccessor) ([]apiv3.Principal, error) {
+func (o *OpenIDCProvider) SearchPrincipals(searchValue, principalType string, token accessor.TokenAccessor, page, pageSize int64) ([]apiv3.Principal, error) {
 	var principals []apiv3.Principal
 
 	if principalType == "" {
@@ -166,6 +166,23 @@ func (o *OpenIDCProvider) SearchPrincipals(searchValue, principalType string, to
 	}
 
 	principals = append(principals, p)
+
+	// Apply pagination if requested
+	if page > 0 && pageSize > 0 {
+		startIndex := int((page - 1) * pageSize)
+		endIndex := startIndex + int(pageSize)
+		
+		if startIndex >= len(principals) {
+			return []apiv3.Principal{}, nil
+		}
+		
+		if endIndex > len(principals) {
+			endIndex = len(principals)
+		}
+		
+		return principals[startIndex:endIndex], nil
+	}
+
 	return principals, nil
 }
 

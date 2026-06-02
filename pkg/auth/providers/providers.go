@@ -172,7 +172,7 @@ func GetPrincipal(principalID string, myToken accessor.TokenAccessor) (apiv3.Pri
 }
 
 // SearchPrincipals searches for principals by name using the token's auth provider, appending deduplicated local results.
-func SearchPrincipals(name, principalType string, myToken accessor.TokenAccessor) ([]apiv3.Principal, error) {
+func SearchPrincipals(name, principalType string, myToken accessor.TokenAccessor, page, pageSize int64) ([]apiv3.Principal, error) {
 	ap := myToken.GetAuthProvider()
 	if ap == "" {
 		return []apiv3.Principal{}, fmt.Errorf("[SearchPrincipals] no authProvider specified in token")
@@ -186,13 +186,13 @@ func SearchPrincipals(name, principalType string, myToken accessor.TokenAccessor
 	if p == nil {
 		return []apiv3.Principal{}, fmt.Errorf("[SearchPrincipals] authProvider %v not initialized", ap)
 	}
-	principals, err := p.SearchPrincipals(name, principalType, myToken)
+	principals, err := p.SearchPrincipals(name, principalType, myToken, page, pageSize)
 	if err != nil {
 		return principals, err
 	}
 	if ap != local.Name {
 		if lpDedupe, _ := lp.(*local.Provider); lpDedupe != nil {
-			localPrincipals, err := lpDedupe.SearchPrincipalsDedupe(name, principalType, myToken, principals)
+			localPrincipals, err := lpDedupe.SearchPrincipalsDedupe(name, principalType, myToken, principals, page, pageSize)
 			if err != nil {
 				return principals, err
 			}

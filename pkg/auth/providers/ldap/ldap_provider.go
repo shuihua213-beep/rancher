@@ -164,7 +164,7 @@ func (p *ldapProvider) AuthenticateUser(_ http.ResponseWriter, _ *http.Request, 
 }
 
 // searchKey can be user PrincipalID e.g. shibboleth_user://username with principalType of group for group search by user
-func (p *ldapProvider) SearchPrincipals(searchKey, principalType string, myToken accessor.TokenAccessor) ([]v3.Principal, error) {
+func (p *ldapProvider) SearchPrincipals(searchKey, principalType string, myToken accessor.TokenAccessor, page, pageSize int64) ([]v3.Principal, error) {
 	var principals []v3.Principal
 	var err error
 
@@ -184,7 +184,7 @@ func (p *ldapProvider) SearchPrincipals(searchKey, principalType string, myToken
 	}
 	defer lConn.Close()
 
-	principals, err = p.searchPrincipals(searchKey, principalType, config, lConn)
+	principals, err = p.searchPrincipals(searchKey, principalType, config, lConn, page, pageSize)
 	if err == nil {
 		for _, principal := range principals {
 			switch principal.PrincipalType {

@@ -199,7 +199,7 @@ func (ap *Provider) RefetchGroupPrincipals(principalID, secret string) ([]apiv3.
 func (ap *Provider) UsesUserSecrets() bool      { return false }
 func (ap *Provider) CanRefreshPrincipals() bool { return true }
 
-func (ap *Provider) SearchPrincipals(name, principalType string, token accessor.TokenAccessor) ([]apiv3.Principal, error) {
+func (ap *Provider) SearchPrincipals(name, principalType string, token accessor.TokenAccessor, page, pageSize int64) ([]apiv3.Principal, error) {
 	cfg, err := ap.GetAzureConfigK8s()
 	if err != nil {
 		return nil, err
@@ -233,6 +233,22 @@ func (ap *Provider) SearchPrincipals(name, principalType string, token accessor.
 		}
 		principals = append(principals, users...)
 		principals = append(principals, groups...)
+	}
+
+	// Apply pagination if requested
+	if page > 0 && pageSize > 0 {
+		startIndex := int((page - 1) * pageSize)
+		endIndex := startIndex + int(pageSize)
+		
+		if startIndex >= len(principals) {
+			return []apiv3.Principal{}, nil
+		}
+		
+		if endIndex > len(principals) {
+			endIndex = len(principals)
+		}
+		
+		return principals[startIndex:endIndex], nil
 	}
 
 	return principals, nil

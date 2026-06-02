@@ -53,7 +53,7 @@ func (g *GenOIDCProvider) GetName() string {
 // that matches the searchValue.  If principalType is empty, both a user principal and a group principal will
 // be returned.  This is done because OIDC does not have a proper lookup mechanism.  In order
 // to provide some degree of functionality that allows manual entry for users/groups, this is the compromise.
-func (g *GenOIDCProvider) SearchPrincipals(searchValue, principalType string, _ accessor.TokenAccessor) ([]apiv3.Principal, error) {
+func (g *GenOIDCProvider) SearchPrincipals(searchValue, principalType string, _ accessor.TokenAccessor, page, pageSize int64) ([]apiv3.Principal, error) {
 	var principals []apiv3.Principal
 
 	if principalType != GroupType {
@@ -76,6 +76,23 @@ func (g *GenOIDCProvider) SearchPrincipals(searchValue, principalType string, _ 
 		}
 		principals = append(principals, gp)
 	}
+
+	// Apply pagination if requested
+	if page > 0 && pageSize > 0 {
+		startIndex := int((page - 1) * pageSize)
+		endIndex := startIndex + int(pageSize)
+		
+		if startIndex >= len(principals) {
+			return []apiv3.Principal{}, nil
+		}
+		
+		if endIndex > len(principals) {
+			endIndex = len(principals)
+		}
+		
+		return principals[startIndex:endIndex], nil
+	}
+
 	return principals, nil
 }
 

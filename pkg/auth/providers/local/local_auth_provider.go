@@ -215,13 +215,13 @@ func (l *Provider) RefetchGroupPrincipals(principalID string, secret string) ([]
 	return l.getGroupPrincipals(user)
 }
 
-func (l *Provider) SearchPrincipals(searchKey, principalType string, token accessor.TokenAccessor) ([]apiv3.Principal, error) {
-	return l.SearchPrincipalsDedupe(searchKey, principalType, token, nil)
+func (l *Provider) SearchPrincipals(searchKey, principalType string, token accessor.TokenAccessor, page, pageSize int64) ([]apiv3.Principal, error) {
+	return l.SearchPrincipalsDedupe(searchKey, principalType, token, nil, page, pageSize)
 }
 
 // SearchPrincipalsDedupe performs principal search, but deduplicates the results against the supplied list (that should have come from other non-local auth providers)
 // This is to avoid getting duplicate search results
-func (l *Provider) SearchPrincipalsDedupe(searchKey, principalType string, token accessor.TokenAccessor, principalsFromOtherProviders []apiv3.Principal) ([]apiv3.Principal, error) {
+func (l *Provider) SearchPrincipalsDedupe(searchKey, principalType string, token accessor.TokenAccessor, principalsFromOtherProviders []apiv3.Principal, page, pageSize int64) ([]apiv3.Principal, error) {
 	fromOtherProviders := map[string]bool{}
 	for _, p := range principalsFromOtherProviders {
 		fromOtherProviders[p.Name] = true
@@ -262,6 +262,22 @@ func (l *Provider) SearchPrincipalsDedupe(searchKey, principalType string, token
 			groupPrincipal := l.toPrincipal("group", group.DisplayName, "", Name+"://"+group.Name, token)
 			principals = append(principals, groupPrincipal)
 		}
+	}
+
+	// Apply pagination if requested
+	if page > 0 && pageSize > 0 {
+		startIndex := int((page - 1) * pageSize)
+		endIndex := startIndex + int(pageSize)
+		
+		if startIndex >= len(principals) {
+			return []apiv3.Principal{}, nil
+		}
+		
+		if endIndex > len(principals) {
+			endIndex = len(principals)
+		}
+		
+		return principals[startIndex:endIndex], nil
 	}
 
 	return principals, nil

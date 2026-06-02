@@ -364,11 +364,11 @@ func (p *ldapProvider) getPrincipal(distinguishedName string, scope string, conf
 	return principal, nil
 }
 
-func (p *ldapProvider) searchPrincipals(name, principalType string, config *v3.LdapConfig, lConn ldapv3.Client) ([]v3.Principal, error) {
+func (p *ldapProvider) searchPrincipals(name, principalType string, config *v3.LdapConfig, lConn ldapv3.Client, page, pageSize int64) ([]v3.Principal, error) {
 	var principals []v3.Principal
 
 	if principalType == "" || principalType == "user" {
-		userPrincipals, err := p.searchUser(name, config, lConn)
+		userPrincipals, err := p.searchUser(name, config, lConn, page, pageSize)
 		if err != nil {
 			return nil, err
 		}
@@ -376,7 +376,7 @@ func (p *ldapProvider) searchPrincipals(name, principalType string, config *v3.L
 	}
 
 	if principalType == "" || principalType == "group" {
-		groupPrincipals, err := p.searchGroup(name, config, lConn)
+		groupPrincipals, err := p.searchGroup(name, config, lConn, page, pageSize)
 		if err != nil {
 			return nil, err
 		}
@@ -386,7 +386,7 @@ func (p *ldapProvider) searchPrincipals(name, principalType string, config *v3.L
 	return principals, nil
 }
 
-func (p *ldapProvider) searchUser(name string, config *v3.LdapConfig, lConn ldapv3.Client) ([]v3.Principal, error) {
+func (p *ldapProvider) searchUser(name string, config *v3.LdapConfig, lConn ldapv3.Client, page, pageSize int64) ([]v3.Principal, error) {
 	if config.UserSearchFilter != "" {
 		// Make sure user search filter contains a valid LDAP query expression
 		// before interpolating it into the search filter.
@@ -410,10 +410,10 @@ func (p *ldapProvider) searchUser(name string, config *v3.LdapConfig, lConn ldap
 	// and is expected to follow ldap syntax and enclosed in parentheses.
 	query += srchAttrs + ")" + config.UserSearchFilter + ")"
 	logrus.Debugf("%s searchUser query: %s", p.providerName, query)
-	return p.searchLdap(query, p.userScope, config, lConn)
+	return p.searchLdap(query, p.userScope, config, lConn, page, pageSize)
 }
 
-func (p *ldapProvider) searchGroup(name string, config *v3.LdapConfig, lConn ldapv3.Client) ([]v3.Principal, error) {
+func (p *ldapProvider) searchGroup(name string, config *v3.LdapConfig, lConn ldapv3.Client, page, pageSize int64) ([]v3.Principal, error) {
 	if config.GroupSearchFilter != "" {
 		// Make sure group search filter contains a valid LDAP query expression
 		// before interpolating it into the search filter.
@@ -437,10 +437,10 @@ func (p *ldapProvider) searchGroup(name string, config *v3.LdapConfig, lConn lda
 	)
 
 	logrus.Debugf("%s searchGroup query: %s scope: %s", p.providerName, query, p.groupScope)
-	return p.searchLdap(query, p.groupScope, config, lConn)
+	return p.searchLdap(query, p.groupScope, config, lConn, page, pageSize)
 }
 
-func (p *ldapProvider) searchLdap(query string, scope string, config *v3.LdapConfig, lConn ldapv3.Client) ([]v3.Principal, error) {
+func (p *ldapProvider) searchLdap(query string, scope string, config *v3.LdapConfig, lConn ldapv3.Client, page, pageSize int64) ([]v3.Principal, error) {
 	var principals []v3.Principal
 	var search *ldapv3.SearchRequest
 
@@ -510,6 +510,22 @@ func (p *ldapProvider) searchLdap(query string, scope string, config *v3.LdapCon
 			return []v3.Principal{}, err
 		}
 		principals = append(principals, *principal)
+	}
+
+	// Apply pagination if requested
+	if page > 0 && pageSize > 0 {
+		startIndex := int((page - 1) * pageSize)
+		endIndex := startIndex + int(pageSize)
+		
+		if startIndex >= len(principals) {
+			return []v3.Principal{}, nil
+		}
+		
+		if endIndex > len(principals) {
+			endIndex = len(principals)
+		}
+		
+		return principals[startIndex:endIndex], nil
 	}
 
 	return principals, nil
