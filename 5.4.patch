@@ -1,0 +1,213 @@
+diff --git a/pkg/auth/providers/activedirectory/guid/guid.go b/pkg/auth/providers/activedirectory/guid/guid.go
+index 0ae2536f4..0fd058c49 100644
+--- a/pkg/auth/providers/activedirectory/guid/guid.go
++++ b/pkg/auth/providers/activedirectory/guid/guid.go
+@@ -24,6 +24,8 @@
+ 	"strings"
+ )
+ 
++const hextable = "0123456789abcdef"
++
+ var uuidRegex = regexp.MustCompile("(?i)^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
+ 
+ // GUID represent the UUID in the DSP0134 spec
+@@ -45,23 +47,84 @@ func (g GUID) UUID() string {
+ 		return ""
+ 	}
+ 
+-	u := swap(g)
+-
+-	return fmt.Sprintf(
+-		"%x-%x-%x-%x-%x",
+-		u[:4], u[4:6], u[6:8], u[8:10], u[10:],
+-	)
++	var buf [36]byte
++	buf[0] = hextable[g[3]>>4]
++	buf[1] = hextable[g[3]&0x0f]
++	buf[2] = hextable[g[2]>>4]
++	buf[3] = hextable[g[2]&0x0f]
++	buf[4] = hextable[g[1]>>4]
++	buf[5] = hextable[g[1]&0x0f]
++	buf[6] = hextable[g[0]>>4]
++	buf[7] = hextable[g[0]&0x0f]
++	buf[8] = '-'
++	buf[9] = hextable[g[5]>>4]
++	buf[10] = hextable[g[5]&0x0f]
++	buf[11] = hextable[g[4]>>4]
++	buf[12] = hextable[g[4]&0x0f]
++	buf[13] = '-'
++	buf[14] = hextable[g[7]>>4]
++	buf[15] = hextable[g[7]&0x0f]
++	buf[16] = hextable[g[6]>>4]
++	buf[17] = hextable[g[6]&0x0f]
++	buf[18] = '-'
++	buf[19] = hextable[g[8]>>4]
++	buf[20] = hextable[g[8]&0x0f]
++	buf[21] = hextable[g[9]>>4]
++	buf[22] = hextable[g[9]&0x0f]
++	buf[23] = '-'
++	buf[24] = hextable[g[10]>>4]
++	buf[25] = hextable[g[10]&0x0f]
++	buf[26] = hextable[g[11]>>4]
++	buf[27] = hextable[g[11]&0x0f]
++	buf[28] = hextable[g[12]>>4]
++	buf[29] = hextable[g[12]&0x0f]
++	buf[30] = hextable[g[13]>>4]
++	buf[31] = hextable[g[13]&0x0f]
++	buf[32] = hextable[g[14]>>4]
++	buf[33] = hextable[g[14]&0x0f]
++	buf[34] = hextable[g[15]>>4]
++	buf[35] = hextable[g[15]&0x0f]
++
++	return string(buf[:])
+ }
+ 
+ // Hex returns the Hex string representation: "33 22 11 00 55 44 77 66 88 99 AA BB CC DD EE FF"
+ func (g GUID) Hex() string {
+-	hexesArr := hexes(g.Bytes())
++	b := g.Bytes()
++	n := len(b)
++	if n == 0 {
++		return ""
++	}
++
++	if n == 16 {
++		var buf [47]byte
++		for i := 0; i < 16; i++ {
++			v := b[i]
++			if i > 0 {
++				buf[i*3-1] = ' '
++			}
++			buf[i*3] = hexToUpper(v >> 4)
++			buf[i*3+1] = hexToUpper(v & 0x0f)
++		}
++		return string(buf[:])
++	}
+ 
+-	for i := range hexesArr {
+-		hexesArr[i] = strings.ToUpper(hexesArr[i])
++	dst := make([]byte, n*3-1)
++	for i, v := range b {
++		if i > 0 {
++			dst[i*3-1] = ' '
++		}
++		dst[i*3] = hexToUpper(v >> 4)
++		dst[i*3+1] = hexToUpper(v & 0x0f)
+ 	}
++	return string(dst)
++}
+ 
+-	return strings.Join(hexesArr, " ")
++func hexToUpper(b byte) byte {
++	if b < 10 {
++		return '0' + b
++	}
++	return 'A' + b - 10
+ }
+ 
+ // New returns a GUID object
+@@ -85,7 +148,12 @@ func Parse(uuid string) (GUID, error) {
+ 		return nil, fmt.Errorf("cannot decode uuid string '%s' to hex: %w", uuid, err)
+ 	}
+ 
+-	return GUID(swap(uuidBytes)), nil
++	uuidBytes[0], uuidBytes[3] = uuidBytes[3], uuidBytes[0]
++	uuidBytes[1], uuidBytes[2] = uuidBytes[2], uuidBytes[1]
++	uuidBytes[4], uuidBytes[5] = uuidBytes[5], uuidBytes[4]
++	uuidBytes[6], uuidBytes[7] = uuidBytes[7], uuidBytes[6]
++
++	return GUID(uuidBytes), nil
+ }
+ 
+ // Escape returns an escaped string format of the objectGUID that can be safely used
+@@ -93,38 +161,19 @@ func Parse(uuid string) (GUID, error) {
+ // and prefixed with the '\' character. If a byte has a hex encoded string of
+ // length 1 then it will be prefixed with a '0'.
+ func Escape(guid GUID) string {
+-	builder := strings.Builder{}
+-
+-	hexArray := hexes(guid.Bytes())
+-	for _, hex := range hexArray {
+-		builder.WriteString(`\`)
+-		builder.WriteString(hex)
+-	}
+-
+-	return builder.String()
+-}
+-
+-// swap will return a new array with the first three "bytes blocks" reversed
+-func swap(u []byte) []byte {
+-	if len(u) != 16 {
+-		return u
+-	}
+-
+-	return []byte{
+-		u[3], u[2], u[1], u[0], // reverse 0-4
+-		u[5], u[4], // reverse 4-5
+-		u[7], u[6], // reverse 6-7
+-		u[8], u[9], u[10], u[11], u[12], u[13], u[14], u[15], // keep 8-15
++	b := guid.Bytes()
++	n := len(b)
++	if n == 0 {
++		return ""
+ 	}
+-}
+-
+-// hexes returns a string array of the hex decoded values
+-func hexes(bytes []byte) []string {
+-	var hexes []string
+ 
+-	for _, b := range bytes {
+-		hexes = append(hexes, fmt.Sprintf("%02x", b))
++	builder := strings.Builder{}
++	builder.Grow(n * 3)
++	for _, v := range b {
++		builder.WriteByte('\\')
++		builder.WriteByte(hextable[v>>4])
++		builder.WriteByte(hextable[v&0x0f])
+ 	}
+ 
+-	return hexes
++	return builder.String()
+ }
+diff --git a/pkg/auth/providers/activedirectory/guid/guid_test.go b/pkg/auth/providers/activedirectory/guid/guid_test.go
+index 42e503ebb..f80401852 100644
+--- a/pkg/auth/providers/activedirectory/guid/guid_test.go
++++ b/pkg/auth/providers/activedirectory/guid/guid_test.go
+@@ -177,3 +177,36 @@ func TestEscape(t *testing.T) {
+ 		})
+ 	}
+ }
++
++var testGUID = guid.GUID([]byte("\xaf\xf6\x0e=[\x96\xe3D\x8f\xea\xb2:}:\xa6\xcb"))
++
++func BenchmarkUUID(b *testing.B) {
++	for i := 0; i < b.N; i++ {
++		_ = testGUID.UUID()
++	}
++}
++
++func BenchmarkHex(b *testing.B) {
++	for i := 0; i < b.N; i++ {
++		_ = testGUID.Hex()
++	}
++}
++
++func BenchmarkEscape(b *testing.B) {
++	for i := 0; i < b.N; i++ {
++		_ = guid.Escape(testGUID)
++	}
++}
++
++func BenchmarkParse(b *testing.B) {
++	for i := 0; i < b.N; i++ {
++		_, _ = guid.Parse("3d0ef6af-965b-44e3-8fea-b23a7d3aa6cb")
++	}
++}
++
++func BenchmarkNew(b *testing.B) {
++	encoded := []byte("\xaf\xf6\x0e=[\x96\xe3D\x8f\xea\xb2:}:\xa6\xcb")
++	for i := 0; i < b.N; i++ {
++		_, _ = guid.New(encoded)
++	}
++}
