@@ -1,0 +1,107 @@
+diff --git a/pkg/api/norman/customization/cluster/actions_kubeconfig_test.go b/pkg/api/norman/customization/cluster/actions_kubeconfig_test.go
+index 2e379861e..464416278 100644
+--- a/pkg/api/norman/customization/cluster/actions_kubeconfig_test.go
++++ b/pkg/api/norman/customization/cluster/actions_kubeconfig_test.go
+@@ -1,10 +1,12 @@
+ package cluster
+ 
+ import (
++	"errors"
+ 	"fmt"
+ 	"net/http"
+ 	"testing"
+ 
++	"github.com/rancher/norman/httperror"
+ 	"github.com/rancher/norman/types"
+ 	"github.com/rancher/norman/types/convert"
+ 	apimgmtv3 "github.com/rancher/rancher/pkg/apis/management.cattle.io/v3"
+@@ -57,6 +59,37 @@ func TestGenerateKubeconfigActionHandler(t *testing.T) {
+ 			hostname:      "https://set-hostname.fake",
+ 			wantErr:       false,
+ 		},
++		{
++			name:             "cluster not found",
++			generateToken:    "true",
++			clusterLookupErr: httperror.NewAPIError(httperror.NotFound, "cluster not found"),
++			wantErr:          true,
++		},
++		{
++			name:             "permission denied",
++			generateToken:    "true",
++			clusterLookupErr: httperror.NewAPIError(httperror.PermissionDenied, "permission denied"),
++			wantErr:          true,
++		},
++		{
++			name:          "node lister error",
++			generateToken: "true",
++			nodeListerErr: errors.New("failed to list nodes"),
++			wantErr:       true,
++		},
++		{
++			name:           "token generation failed",
++			generateToken:  "true",
++			tokenCreateErr: errors.New("failed to create token"),
++			wantErr:        true,
++		},
++		{
++			name:              "cluster token generation failed with ACE enabled",
++			generateToken:     "true",
++			clusterAceEnabled: true,
++			tokenCreateErr:    errors.New("failed to create cluster token"),
++			wantErr:           true,
++		},
+ 	}
+ 
+ 	const (
+@@ -65,17 +98,24 @@ func TestGenerateKubeconfigActionHandler(t *testing.T) {
+ 		testUser        = ""
+ 	)
+ 
+-	ctrl := gomock.NewController(t)
+-	userManager := userMocks.NewMockManager(ctrl)
+-	userManager.EXPECT().GetUser(gomock.Any()).Return(testUser).AnyTimes()
+-
+ 	for _, test := range tests {
+ 		t.Run(test.name, func(t *testing.T) {
++			ctrl := gomock.NewController(t)
++			userManager := userMocks.NewMockManager(ctrl)
++
++			currentUser := testUser
++			if test.tokenCreateErr != nil {
++				currentUser = errUserName
++			}
++			userManager.EXPECT().GetUser(gomock.Any()).Return(currentUser).AnyTimes()
+ 			testSchemas := types.NewSchemas().AddSchemas(managementSchema.Schemas)
+ 			clusterSchema := testSchemas.Schema(&managementSchema.Version, v3.ClusterType)
+ 			fakeStore := fakeClusterStore{
+ 				cluster: v3.Cluster{
+ 					Name: testClusterName,
++					LocalClusterAuthEndpoint: &v3.LocalClusterAuthEndpoint{
++						Enabled: test.clusterAceEnabled,
++					},
+ 				},
+ 				err: test.clusterLookupErr,
+ 			}
+@@ -123,6 +163,22 @@ func TestGenerateKubeconfigActionHandler(t *testing.T) {
+ 			err = handler.GenerateKubeconfigActionHandler("not-used", nil, apiContext)
+ 			if test.wantErr {
+ 				assert.Error(t, err, "expected an error but did not get one")
++				if test.clusterLookupErr != nil {
++					var apiErr *httperror.APIError
++					if errors.As(err, &apiErr) {
++						expectedErr := test.clusterLookupErr.(*httperror.APIError)
++						assert.Equal(t, expectedErr.Code, apiErr.Code, "expected error code to match")
++						assert.Contains(t, apiErr.Message, expectedErr.Message, "expected error message to contain expected text")
++					} else {
++						assert.Fail(t, "expected httperror.APIError type for cluster lookup errors")
++					}
++				}
++				if test.nodeListerErr != nil {
++					assert.Contains(t, err.Error(), test.nodeListerErr.Error(), "expected error message to contain node lister error")
++				}
++				if test.tokenCreateErr != nil {
++					assert.Contains(t, err.Error(), test.tokenCreateErr.Error(), "expected error message to contain token creation error")
++				}
+ 			} else {
+ 				assert.NoError(t, err, "got an error when calling generate kubeconfig")
+ 				assert.Len(t, recorder.Responses, 1, "expected a single response")
