@@ -1,0 +1,133 @@
+diff --git a/pkg/api/norman/customization/cluster/actions_kubeconfig_test.go b/pkg/api/norman/customization/cluster/actions_kubeconfig_test.go
+index 2e379861e..9e4cd2a71 100644
+--- a/pkg/api/norman/customization/cluster/actions_kubeconfig_test.go
++++ b/pkg/api/norman/customization/cluster/actions_kubeconfig_test.go
+@@ -5,6 +5,7 @@
+ 	"net/http"
+ 	"testing"
+ 
++	"github.com/rancher/norman/httperror"
+ 	"github.com/rancher/norman/types"
+ 	"github.com/rancher/norman/types/convert"
+ 	apimgmtv3 "github.com/rancher/rancher/pkg/apis/management.cattle.io/v3"
+@@ -28,12 +29,14 @@ func TestGenerateKubeconfigActionHandler(t *testing.T) {
+ 		hostname          string
+ 		generateToken     string
+ 		clusterAceEnabled bool
++		endpointEnabled   bool
+ 
+ 		clusterLookupErr error
+ 		nodeListerErr    error
+ 		tokenCreateErr   error
+ 
+-		wantErr bool
++		wantErr    bool
++		wantErrMsg string
+ 	}{
+ 		{
+ 			name:          "no token generation",
+@@ -57,6 +60,42 @@ func TestGenerateKubeconfigActionHandler(t *testing.T) {
+ 			hostname:      "https://set-hostname.fake",
+ 			wantErr:       false,
+ 		},
++		{
++			name:             "cluster lookup error",
++			generateToken:    "false",
++			clusterLookupErr: fmt.Errorf("cluster not found"),
++			wantErr:          true,
++			wantErrMsg:       "cluster not found",
++		},
++		{
++			name:             "cluster lookup error - insufficient permissions",
++			generateToken:    "false",
++			clusterLookupErr: httperror.NewAPIError(httperror.PermissionDenied, "permission denied"),
++			wantErr:          true,
++			wantErrMsg:       "permission denied",
++		},
++		{
++			name:           "token create error",
++			generateToken:  "true",
++			tokenCreateErr: fmt.Errorf("failed to create token"),
++			wantErr:        true,
++			wantErrMsg:     "failed to create token",
++		},
++		{
++			name:            "token create error with endpoint enabled",
++			generateToken:   "true",
++			endpointEnabled: true,
++			tokenCreateErr:  fmt.Errorf("failed to create cluster token"),
++			wantErr:         true,
++			wantErrMsg:      "failed to create cluster token",
++		},
++		{
++			name:          "node lister error",
++			generateToken: "false",
++			nodeListerErr: fmt.Errorf("failed to list nodes"),
++			wantErr:       true,
++			wantErrMsg:    "failed to list nodes",
++		},
+ 	}
+ 
+ 	const (
+@@ -73,11 +112,15 @@ func TestGenerateKubeconfigActionHandler(t *testing.T) {
+ 		t.Run(test.name, func(t *testing.T) {
+ 			testSchemas := types.NewSchemas().AddSchemas(managementSchema.Schemas)
+ 			clusterSchema := testSchemas.Schema(&managementSchema.Version, v3.ClusterType)
++			clusterObj := v3.Cluster{
++				Name: testClusterName,
++			}
++			if test.endpointEnabled {
++				clusterObj.LocalClusterAuthEndpoint = &v3.LocalClusterAuthEndpoint{Enabled: true}
++			}
+ 			fakeStore := fakeClusterStore{
+-				cluster: v3.Cluster{
+-					Name: testClusterName,
+-				},
+-				err: test.clusterLookupErr,
++				cluster: clusterObj,
++				err:     test.clusterLookupErr,
+ 			}
+ 			clusterSchema.Store = &fakeStore
+ 			err := settings.KubeconfigGenerateToken.Set(test.generateToken)
+@@ -117,12 +160,15 @@ func TestGenerateKubeconfigActionHandler(t *testing.T) {
+ 					},
+ 				},
+ 				UserMgr:   userManager,
+-				TokenMgr:  &fakeTokenManager{},
++				TokenMgr:  &fakeTokenManager{err: test.tokenCreateErr},
+ 				AuthToken: &fakeAuth,
+ 			}
+ 			err = handler.GenerateKubeconfigActionHandler("not-used", nil, apiContext)
+ 			if test.wantErr {
+ 				assert.Error(t, err, "expected an error but did not get one")
++				if test.wantErrMsg != "" {
++					assert.Contains(t, err.Error(), test.wantErrMsg)
++				}
+ 			} else {
+ 				assert.NoError(t, err, "got an error when calling generate kubeconfig")
+ 				assert.Len(t, recorder.Responses, 1, "expected a single response")
+@@ -216,15 +262,23 @@ func (f *fakeAuthToken) TokenFromRequest(req *http.Request) (accessor.TokenAcces
+ 	return &f.token, nil
+ }
+ 
+-type fakeTokenManager struct{}
++type fakeTokenManager struct {
++	err error
++}
+ 
+ func (f *fakeTokenManager) EnsureToken(input user.TokenInput) (string, runtime.Object, error) {
++	if f.err != nil {
++		return "", nil, f.err
++	}
+ 	if input.UserName == errUserName {
+ 		return "", nil, fmt.Errorf("can't generate token for err user")
+ 	}
+ 	return input.TokenName + ":" + "tokenvalue", nil, nil
+ }
+ func (f *fakeTokenManager) EnsureClusterToken(clusterName string, input user.TokenInput) (string, runtime.Object, error) {
++	if f.err != nil {
++		return "", nil, f.err
++	}
+ 	if input.UserName == errUserName {
+ 		return "", nil, fmt.Errorf("can't generate token for err user")
+ 	}
