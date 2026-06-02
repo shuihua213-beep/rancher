@@ -3,6 +3,7 @@ package genericoidc
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"strings"
 
 	"github.com/pkg/errors"
@@ -44,15 +45,10 @@ func Configure(ctx context.Context, mgmtCtx *config.ScaledContext, userMGR user.
 	return p
 }
 
-// GetName returns the name of this provider.
 func (g *GenOIDCProvider) GetName() string {
 	return Name
 }
 
-// SearchPrincipals will return a principal of the requested principalType with a displayName
-// that matches the searchValue.  If principalType is empty, both a user principal and a group principal will
-// be returned.  This is done because OIDC does not have a proper lookup mechanism.  In order
-// to provide some degree of functionality that allows manual entry for users/groups, this is the compromise.
 func (g *GenOIDCProvider) SearchPrincipals(searchValue, principalType string, _ accessor.TokenAccessor) ([]apiv3.Principal, error) {
 	var principals []apiv3.Principal
 
@@ -82,7 +78,6 @@ func (g *GenOIDCProvider) SearchPrincipals(searchValue, principalType string, _ 
 func (g *GenOIDCProvider) GetPrincipal(principalID string, token accessor.TokenAccessor) (apiv3.Principal, error) {
 	var p apiv3.Principal
 
-	// parsing id to get the external id and type. Example genericoidc_<user|group>://<user sub | group name>
 	principalScheme, externalID, found := strings.Cut(principalID, "://")
 	if !found {
 		return p, fmt.Errorf("invalid principal id: %s", principalID)
@@ -113,7 +108,55 @@ func (g *GenOIDCProvider) GetPrincipal(principalID string, token accessor.TokenA
 	return p, nil
 }
 
-// TransformToAuthProvider yields information used, typically by the UI, to be able to form URLs used to perform login.
+func (g *GenOIDCProvider) LoginUser(w http.ResponseWriter, req *http.Request, oauthLoginInfo *apiv3.OIDCLogin, config *apiv3.OIDCConfig) (apiv3.Principal, []apiv3.Principal, string, baseoidc.ClaimInfo, error) {
+	var err error
+	if config == nil {
+		config, err = g.GetConfig()
+		if err != nil {
+			return apiv3.Principal{}, nil, "", baseoidc.ClaimInfo{}, err
+		}
+	}
+
+	userPrincipal, groupPrincipals, providerToken, claimInfo, err := g.OpenIDCProvider.LoginUser(w, req, oauthLoginInfo, config)
+	if err != nil {
+		return apiv3.Principal{}, nil, "", baseoidc.ClaimInfo{}, err
+	}
+
+	if userPrincipal.LoginName == "" && claimInfo.Email != "" {
+		userPrincipal.LoginName = claimInfo.Email
+	}
+	if userPrincipal.DisplayName == "" {
+		switch {
+		case claimInfo.Name != "":
+			userPrincipal.DisplayName = claimInfo.Name
+		case userPrincipal.LoginName != "":
+			userPrincipal.DisplayName = userPrincipal.LoginName
+		}
+	}
+
+	if err := g.validateLoginUserResult(userPrincipal, claimInfo, config); err != nil {
+		return apiv3.Principal{}, nil, "", baseoidc.ClaimInfo{}, err
+	}
+
+	return userPrincipal, groupPrincipals, providerToken, claimInfo, nil
+}
+
+func (g *GenOIDCProvider) validateLoginUserResult(userPrincipal apiv3.Principal, claimInfo baseoidc.ClaimInfo, config *apiv3.OIDCConfig) error {
+	if userPrincipal.PrincipalType == UserType && strings.HasSuffix(userPrincipal.Name, "://") {
+		return fmt.Errorf("invalid user info response: missing subject")
+	}
+	if config == nil {
+		return nil
+	}
+	if config.NameClaim != "" && claimInfo.Name == "" {
+		return fmt.Errorf("invalid token claims: missing %s claim", config.NameClaim)
+	}
+	if config.EmailClaim != "" && claimInfo.Email == "" {
+		return fmt.Errorf("invalid token claims: missing %s claim", config.EmailClaim)
+	}
+	return nil
+}
+
 func (g *GenOIDCProvider) TransformToAuthProvider(authConfig map[string]any) (map[string]any, error) {
 	p, err := g.OpenIDCProvider.TransformToAuthProvider(authConfig)
 	if err != nil {
@@ -130,7 +173,6 @@ func (g *GenOIDCProvider) TransformToAuthProvider(authConfig map[string]any) (ma
 	return p, nil
 }
 
-// RefetchGroupPrincipals is not implemented for OIDC.
 func (g *GenOIDCProvider) RefetchGroupPrincipals(principalID string, secret string) ([]apiv3.Principal, error) {
 	return nil, errors.New("Not implemented")
 }
@@ -138,8 +180,6 @@ func (g *GenOIDCProvider) RefetchGroupPrincipals(principalID string, secret stri
 func (g *GenOIDCProvider) UsesUserSecrets() bool      { return false }
 func (g *GenOIDCProvider) CanRefreshPrincipals() bool { return false }
 
-// groupToPrincipal takes a bare group name and turns it into a apiv3.Principal group object by filling-in other fields
-// with basic provider information.
 func (g *GenOIDCProvider) groupToPrincipal(groupName string) apiv3.Principal {
 	return apiv3.Principal{
 		ObjectMeta:    metav1.ObjectMeta{Name: g.Name + "_" + GroupType + "://" + groupName},
@@ -150,8 +190,6 @@ func (g *GenOIDCProvider) groupToPrincipal(groupName string) apiv3.Principal {
 	}
 }
 
-// toPrincipalFromToken uses additional information about the principal found in the token, if available, to provide
-// a more detailed, useful Principal object.
 func (g *GenOIDCProvider) toPrincipalFromToken(principalType string, princ apiv3.Principal, token accessor.TokenAccessor) apiv3.Principal {
 	if principalType == UserType {
 		princ.PrincipalType = UserType

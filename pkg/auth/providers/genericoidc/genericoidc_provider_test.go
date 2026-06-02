@@ -1,15 +1,33 @@
 package genericoidc
 
 import (
+	"context"
+	"crypto/rand"
+	"crypto/rsa"
+	"encoding/base64"
+	"encoding/json"
+	"math/big"
+	"net"
+	"net/http"
+	"net/http/httptest"
 	"reflect"
+	"strconv"
 	"testing"
+	"time"
 
+	"github.com/golang-jwt/jwt/v5"
+	"github.com/rancher/norman/types"
 	ext "github.com/rancher/rancher/pkg/apis/ext.cattle.io/v1"
 	apiv3 "github.com/rancher/rancher/pkg/apis/management.cattle.io/v3"
+	"github.com/rancher/rancher/pkg/auth/accessor"
 	"github.com/rancher/rancher/pkg/auth/providers/oidc"
 	baseoidc "github.com/rancher/rancher/pkg/auth/providers/oidc"
 	client "github.com/rancher/rancher/pkg/client/generated/management/v3"
+	userMocks "github.com/rancher/rancher/pkg/user/mocks"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	"go.uber.org/mock/gomock"
+	"golang.org/x/oauth2"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -128,7 +146,6 @@ func TestGenOIDCProvider_GetPrincipalExt(t *testing.T) {
 		want        apiv3.Principal
 		wantErr     bool
 	}{
-		// Note: ext tokens do not have `Me` information. current/other not distinguishable.
 		{
 			name:        "fetch principal",
 			principalID: "genericoidc_user://1234567",
@@ -298,7 +315,6 @@ func TestGenOIDCProvider_SearchPrincipals(t *testing.T) {
 			}
 		})
 
-		// And same behaviour for ext tokens
 		t.Run(test.name+", ext", func(t *testing.T) {
 			t.Parallel()
 			result, err := g.SearchPrincipals(test.searchValue, test.principalType, &ext.Token{})
@@ -372,4 +388,241 @@ func TestGenOIDCProvider_TransformToAuthProvider(t *testing.T) {
 			assert.Equal(t, test.expected, result)
 		})
 	}
+}
+
+func TestGenOIDCProvider_LoginUser_ErrorScenarios(t *testing.T) {
+	privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	require.NoError(t, err)
+
+	tests := map[string]struct {
+		config                func(string) *apiv3.OIDCConfig
+		oidcProviderResponses func(string) genericOIDCResponses
+		setupUserManager      func(*userMocks.MockManager)
+		expectedError         string
+	}{
+		"invalid issuer": {
+			config: func(_ string) *apiv3.OIDCConfig {
+				return &apiv3.OIDCConfig{
+					Issuer:   "://invalid",
+					ClientID: "test",
+				}
+			},
+			oidcProviderResponses: func(port string) genericOIDCResponses {
+				return newGenericOIDCResponses(privateKey, port)
+			},
+			setupUserManager: func(*userMocks.MockManager) {},
+			expectedError:    "missing protocol scheme",
+		},
+		"missing subject in user info": {
+			config: func(port string) *apiv3.OIDCConfig {
+				return newGenericOIDCConfig(port)
+			},
+			oidcProviderResponses: func(port string) genericOIDCResponses {
+				resp := newGenericOIDCResponses(privateKey, port)
+				resp.user = `{"email":"test@example.com"}`
+				return resp
+			},
+			setupUserManager: func(userManager *userMocks.MockManager) {
+				userManager.EXPECT().CheckAccess(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).Return(true, nil)
+			},
+			expectedError: "missing subject",
+		},
+		"missing configured name claim": {
+			config: func(port string) *apiv3.OIDCConfig {
+				cfg := newGenericOIDCConfig(port)
+				cfg.NameClaim = "display_name"
+				return cfg
+			},
+			oidcProviderResponses: func(port string) genericOIDCResponses {
+				return newGenericOIDCResponses(privateKey, port)
+			},
+			setupUserManager: func(userManager *userMocks.MockManager) {
+				userManager.EXPECT().CheckAccess(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).Return(true, nil)
+			},
+			expectedError: "missing display_name claim",
+		},
+		"missing configured email claim": {
+			config: func(port string) *apiv3.OIDCConfig {
+				cfg := newGenericOIDCConfig(port)
+				cfg.EmailClaim = "public_email"
+				return cfg
+			},
+			oidcProviderResponses: func(port string) genericOIDCResponses {
+				return newGenericOIDCResponses(privateKey, port)
+			},
+			setupUserManager: func(userManager *userMocks.MockManager) {
+				userManager.EXPECT().CheckAccess(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).Return(true, nil)
+			},
+			expectedError: "missing public_email claim",
+		},
+	}
+
+	for name, test := range tests {
+		t.Run(name, func(t *testing.T) {
+			ctrl := gomock.NewController(t)
+			listener, err := net.Listen("tcp", ":0")
+			require.NoError(t, err)
+			port := strconv.Itoa(listener.Addr().(*net.TCPAddr).Port)
+			server := mockGenericOIDCServer(listener, test.oidcProviderResponses(port))
+			defer server.Shutdown(context.TODO())
+
+			userManager := userMocks.NewMockManager(ctrl)
+			test.setupUserManager(userManager)
+
+			provider := &GenOIDCProvider{
+				oidc.OpenIDCProvider{
+					Name:     Name,
+					Type:     client.GenericOIDCConfigType,
+					TokenMgr: &testGenericOIDCTokenManager{},
+					UserMGR:  userManager,
+				},
+			}
+
+			recorder := httptest.NewRecorder()
+			request := httptest.NewRequest(http.MethodGet, "https://localhost:"+port, nil)
+
+			_, _, _, _, err = provider.LoginUser(recorder, request, &apiv3.OIDCLogin{Code: "test-code"}, test.config(port))
+			require.Error(t, err)
+			assert.ErrorContains(t, err, test.expectedError)
+		})
+	}
+}
+
+type testGenericOIDCTokenManager struct{}
+
+func (t *testGenericOIDCTokenManager) UpdateSecret(userID, provider, secret string) error {
+	return nil
+}
+
+func (t *testGenericOIDCTokenManager) CreateTokenAndSetCookie(userID string, userPrincipal apiv3.Principal, groupPrincipals []apiv3.Principal, providerToken string, ttl int, description string, request *types.APIContext) error {
+	return nil
+}
+
+func (t *testGenericOIDCTokenManager) CreateSecret(userID, provider, secret string) error {
+	return nil
+}
+
+func (t *testGenericOIDCTokenManager) GetSecret(userID string, provider string, fallbackTokens []accessor.TokenAccessor) (string, error) {
+	return "", nil
+}
+
+func mockGenericOIDCServer(listener net.Listener, resp genericOIDCResponses) *http.Server {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/.well-known/openid-configuration", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(resp.config)
+	})
+	mux.HandleFunc("/.well-known/jwks.json", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(resp.jwks)
+	})
+	mux.HandleFunc("/user", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(resp.user))
+	})
+	mux.HandleFunc("/token", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(resp.token)
+	})
+
+	server := &http.Server{Handler: mux}
+	go func() {
+		_ = server.Serve(listener)
+	}()
+	return server
+}
+
+type genericOIDCResponses struct {
+	user   string
+	config genericProviderJSON
+	jwks   genericJSONWebKeySet
+	token  *genericToken
+}
+
+type genericToken struct {
+	oauth2.Token
+	IDToken string `json:"id_token"`
+}
+
+func newGenericOIDCResponses(privateKey *rsa.PrivateKey, port string) genericOIDCResponses {
+	tokenJWT := jwt.New(jwt.SigningMethodRS256)
+	tokenJWT.Claims = jwt.MapClaims{
+		"aud":   "test",
+		"email": "test@example.com",
+		"exp":   time.Now().Add(5 * time.Minute).Unix(),
+		"iss":   "http://localhost:" + port,
+	}
+	tokenStr, err := tokenJWT.SignedString(privateKey)
+	if err != nil {
+		panic(err)
+	}
+
+	return genericOIDCResponses{
+		user: `{
+			"sub": "a8d0d2c4-6543-4546-8f1a-73e1d7dffcbd",
+			"email": "test@example.com",
+			"groups": ["admingroup"],
+			"full_group_path": ["/admingroup"],
+			"roles": ["adminrole"]
+		}`,
+		config: genericProviderJSON{
+			Issuer:      "http://localhost:" + port,
+			UserInfoURL: "http://localhost:" + port + "/user",
+			JWKSURL:     "http://localhost:" + port + "/.well-known/jwks.json",
+			AuthURL:     "http://localhost:" + port + "/auth",
+			TokenURL:    "http://localhost:" + port + "/token",
+		},
+		token: &genericToken{
+			Token: oauth2.Token{
+				AccessToken:  tokenStr,
+				Expiry:       time.Now().Add(5 * time.Minute),
+				RefreshToken: tokenStr,
+			},
+			IDToken: tokenStr,
+		},
+		jwks: genericJSONWebKeySet{
+			Keys: []genericJSONWebKey{
+				{
+					Kty: "RSA",
+					Kid: "example-key-id",
+					Use: "sig",
+					Alg: "RS256",
+					N:   base64.RawURLEncoding.EncodeToString(privateKey.PublicKey.N.Bytes()),
+					E:   base64.RawURLEncoding.EncodeToString(big.NewInt(int64(privateKey.PublicKey.E)).Bytes()),
+				},
+			},
+		},
+	}
+}
+
+func newGenericOIDCConfig(port string) *apiv3.OIDCConfig {
+	return &apiv3.OIDCConfig{
+		Issuer:           "http://localhost:" + port,
+		ClientID:         "test",
+		JWKSUrl:          "http://localhost:" + port + "/.well-known/jwks.json",
+		AuthEndpoint:     "http://localhost:" + port + "/auth",
+		TokenEndpoint:    "http://localhost:" + port + "/token",
+		UserInfoEndpoint: "http://localhost:" + port + "/user",
+	}
+}
+
+type genericJSONWebKeySet struct {
+	Keys []genericJSONWebKey `json:"keys"`
+}
+
+type genericJSONWebKey struct {
+	Kty string `json:"kty"`
+	Kid string `json:"kid"`
+	Use string `json:"use"`
+	Alg string `json:"alg"`
+	N   string `json:"n"`
+	E   string `json:"e"`
+}
+
+type genericProviderJSON struct {
+	Issuer      string `json:"issuer"`
+	AuthURL     string `json:"authorization_endpoint"`
+	TokenURL    string `json:"token_endpoint"`
+	JWKSURL     string `json:"jwks_uri"`
+	UserInfoURL string `json:"userinfo_endpoint"`
 }
