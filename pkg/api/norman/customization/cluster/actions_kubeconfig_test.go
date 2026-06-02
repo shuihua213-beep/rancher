@@ -57,6 +57,21 @@ func TestGenerateKubeconfigActionHandler(t *testing.T) {
 			hostname:      "https://set-hostname.fake",
 			wantErr:       false,
 		},
+		{
+			name:             "cluster not found",
+			clusterLookupErr: fmt.Errorf("cluster not found"),
+			wantErr:          true,
+		},
+		{
+			name:             "permission denied",
+			clusterLookupErr: fmt.Errorf("permission denied"),
+			wantErr:          true,
+		},
+		{
+			name:           "node lister error",
+			nodeListerErr:  fmt.Errorf("node list error"),
+			wantErr:        true,
+		},
 	}
 
 	const (
@@ -76,6 +91,9 @@ func TestGenerateKubeconfigActionHandler(t *testing.T) {
 			fakeStore := fakeClusterStore{
 				cluster: v3.Cluster{
 					Name: testClusterName,
+					LocalClusterAuthEndpoint: &v3.LocalClusterAuthEndpoint{
+						Enabled: test.clusterAceEnabled,
+					},
 				},
 				err: test.clusterLookupErr,
 			}
@@ -229,4 +247,196 @@ func (f *fakeTokenManager) EnsureClusterToken(clusterName string, input user.Tok
 		return "", nil, fmt.Errorf("can't generate token for err user")
 	}
 	return input.TokenName + ":" + "tokenvalue", nil, nil
+}
+
+func TestGenerateKubeconfigActionHandler_ErrorPaths(t *testing.T) {
+	const (
+		testClusterName = "test-cluster"
+		fakeHost        = "fake-request-host.fake"
+	)
+
+	t.Run("token generation failure", func(t *testing.T) {
+		testSchemas := types.NewSchemas().AddSchemas(managementSchema.Schemas)
+		clusterSchema := testSchemas.Schema(&managementSchema.Version, v3.ClusterType)
+		clusterSchema.Store = &fakeClusterStore{
+			cluster: v3.Cluster{
+				Name: testClusterName,
+			},
+		}
+
+		err := settings.KubeconfigGenerateToken.Set("true")
+		assert.NoError(t, err)
+		err = settings.ServerURL.Set("")
+		assert.NoError(t, err)
+
+		recorder := normanRecorder{}
+		apiContext := &types.APIContext{
+			ID:             testClusterName,
+			Version:        &managementSchema.Version,
+			Type:           v3.ClusterType,
+			ResponseWriter: &recorder,
+			Schemas:        testSchemas,
+			Request:        &http.Request{Host: fakeHost},
+		}
+
+		ctrl := gomock.NewController(t)
+		userManager := userMocks.NewMockManager(ctrl)
+		userManager.EXPECT().GetUser(gomock.Any()).Return(errUserName).AnyTimes()
+
+		fakeAuth := fakeAuthToken{
+			token: apimgmtv3.Token{
+				AuthProvider: "local",
+				UserPrincipal: apimgmtv3.Principal{
+					Provider: "local",
+					ObjectMeta: metav1.ObjectMeta{
+						Name: errUserName,
+					},
+				},
+			},
+		}
+
+		handler := ActionHandler{
+			NodeLister: &fakes.NodeListerMock{
+				ListFunc: func(namespace string, selector labels.Selector) ([]*apimgmtv3.Node, error) {
+					return nil, nil
+				},
+			},
+			UserMgr:   userManager,
+			TokenMgr:  &fakeTokenManager{},
+			AuthToken: &fakeAuth,
+		}
+		err = handler.GenerateKubeconfigActionHandler("not-used", nil, apiContext)
+		assert.Error(t, err, "expected an error for token generation failure")
+		assert.Contains(t, err.Error(), "can't generate token for err user")
+	})
+
+	t.Run("endpoint enabled with token generation", func(t *testing.T) {
+		testSchemas := types.NewSchemas().AddSchemas(managementSchema.Schemas)
+		clusterSchema := testSchemas.Schema(&managementSchema.Version, v3.ClusterType)
+		clusterSchema.Store = &fakeClusterStore{
+			cluster: v3.Cluster{
+				Name: testClusterName,
+				LocalClusterAuthEndpoint: &v3.LocalClusterAuthEndpoint{
+					Enabled: true,
+				},
+			},
+		}
+
+		err := settings.KubeconfigGenerateToken.Set("true")
+		assert.NoError(t, err)
+		err = settings.ServerURL.Set("")
+		assert.NoError(t, err)
+
+		recorder := normanRecorder{}
+		apiContext := &types.APIContext{
+			ID:             testClusterName,
+			Version:        &managementSchema.Version,
+			Type:           v3.ClusterType,
+			ResponseWriter: &recorder,
+			Schemas:        testSchemas,
+			Request:        &http.Request{Host: fakeHost},
+		}
+
+		ctrl := gomock.NewController(t)
+		userManager := userMocks.NewMockManager(ctrl)
+		userManager.EXPECT().GetUser(gomock.Any()).Return("").AnyTimes()
+
+		fakeAuth := fakeAuthToken{
+			token: apimgmtv3.Token{
+				AuthProvider: "local",
+				UserPrincipal: apimgmtv3.Principal{
+					Provider: "local",
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "",
+					},
+				},
+			},
+		}
+
+		handler := ActionHandler{
+			NodeLister: &fakes.NodeListerMock{
+				ListFunc: func(namespace string, selector labels.Selector) ([]*apimgmtv3.Node, error) {
+					return nil, nil
+				},
+			},
+			UserMgr:   userManager,
+			TokenMgr:  &fakeTokenManager{},
+			AuthToken: &fakeAuth,
+		}
+		err = handler.GenerateKubeconfigActionHandler("not-used", nil, apiContext)
+		assert.NoError(t, err, "got an error when calling generate kubeconfig with endpoint enabled")
+		assert.Len(t, recorder.Responses, 1)
+		assert.Equal(t, 200, recorder.Responses[0].Code)
+		data, ok := recorder.Responses[0].Data.(map[string]interface{})
+		assert.True(t, ok, "type assertion failed")
+		kubeconfigStr, ok := data["config"].(string)
+		assert.True(t, ok, "no string kubeconfig in response data")
+		assert.Contains(t, kubeconfigStr, "kubeconfig-:", "token expected in kubeconfig")
+		assert.Contains(t, kubeconfigStr, fakeHost, "expected hostname in kubeconfig")
+	})
+
+	t.Run("endpoint enabled without token generation", func(t *testing.T) {
+		testSchemas := types.NewSchemas().AddSchemas(managementSchema.Schemas)
+		clusterSchema := testSchemas.Schema(&managementSchema.Version, v3.ClusterType)
+		clusterSchema.Store = &fakeClusterStore{
+			cluster: v3.Cluster{
+				Name: testClusterName,
+				LocalClusterAuthEndpoint: &v3.LocalClusterAuthEndpoint{
+					Enabled: true,
+				},
+			},
+		}
+
+		err := settings.KubeconfigGenerateToken.Set("false")
+		assert.NoError(t, err)
+		err = settings.ServerURL.Set("")
+		assert.NoError(t, err)
+
+		recorder := normanRecorder{}
+		apiContext := &types.APIContext{
+			ID:             testClusterName,
+			Version:        &managementSchema.Version,
+			Type:           v3.ClusterType,
+			ResponseWriter: &recorder,
+			Schemas:        testSchemas,
+			Request:        &http.Request{Host: fakeHost},
+		}
+
+		ctrl := gomock.NewController(t)
+		userManager := userMocks.NewMockManager(ctrl)
+		userManager.EXPECT().GetUser(gomock.Any()).Return("").AnyTimes()
+
+		fakeAuth := fakeAuthToken{
+			token: apimgmtv3.Token{
+				AuthProvider: "local",
+				UserPrincipal: apimgmtv3.Principal{
+					Provider: "local",
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "",
+					},
+				},
+			},
+		}
+
+		handler := ActionHandler{
+			NodeLister: &fakes.NodeListerMock{
+				ListFunc: func(namespace string, selector labels.Selector) ([]*apimgmtv3.Node, error) {
+					return nil, nil
+				},
+			},
+			UserMgr:   userManager,
+			TokenMgr:  &fakeTokenManager{},
+			AuthToken: &fakeAuth,
+		}
+		err = handler.GenerateKubeconfigActionHandler("not-used", nil, apiContext)
+		assert.NoError(t, err, "got an error when calling generate kubeconfig without token")
+		assert.Len(t, recorder.Responses, 1)
+		assert.Equal(t, 200, recorder.Responses[0].Code)
+		data, ok := recorder.Responses[0].Data.(map[string]interface{})
+		assert.True(t, ok, "type assertion failed")
+		kubeconfigStr, ok := data["config"].(string)
+		assert.True(t, ok, "no string kubeconfig in response data")
+		assert.NotContains(t, kubeconfigStr, "kubeconfig-:", "token should not be in kubeconfig")
+		assert.Contains(t, kubeconfigStr, fakeHost, "expected hostname in kubeconfig")
+	})
 }
