@@ -11,10 +11,19 @@ func Register(server *steve.Server) {
 		Group: "management.cattle.io",
 		Kind:  "Setting",
 		Formatter: func(request *types.APIRequest, resource *types.RawResource) {
-			data := resource.APIObject.Data()
-			if data.String("value") == "" {
-				data.Set("value", data.String("default"))
+			format(resource)
+		},
+		CollectionFormatter: func(request *types.APIRequest, collection *types.GenericCollection) {
+			for i := range collection.Data {
+				format(&collection.Data[i])
 			}
 		},
 	})
+}
+
+func format(resource *types.RawResource) {
+	data := resource.APIObject.Data()
+	if data.String("value") == "" {
+		data.Set("value", data.String("default"))
+	}
 }
