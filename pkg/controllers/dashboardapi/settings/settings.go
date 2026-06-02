@@ -10,6 +10,7 @@ import (
 	"github.com/sirupsen/logrus"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
 
 	v3 "github.com/rancher/rancher/pkg/apis/management.cattle.io/v3"
 	managementcontrollers "github.com/rancher/rancher/pkg/generated/controllers/management.cattle.io/v3"
@@ -37,20 +38,105 @@ func (s *settingsProvider) Get(name string) string {
 		return value
 	}
 
-	obj, err := s.settingCache.Get(name)
-	if err != nil {
-		val, err := s.settings.Get(name, metav1.GetOptions{})
-		if err != nil {
+	var (
+		obj *v3.Setting
+		err error
+	)
+	if s.settingCache != nil {
+		obj, err = s.settingCache.Get(name)
+	}
+	if err != nil || obj == nil {
+		val, getErr := s.settings.Get(name, metav1.GetOptions{})
+		if getErr != nil {
 			return s.fallback[name]
 		}
 		obj = val
 	}
 
-	if obj.Value == "" {
-		return obj.Default
+	return effectiveValue(obj, s.fallback[name])
+}
+
+func (s *settingsProvider) GetAll(names ...string) map[string]string {
+	values := make(map[string]string, len(names))
+	if len(names) == 0 {
+		return values
 	}
 
-	return obj.Value
+	remaining := make([]string, 0, len(names))
+	seen := map[string]struct{}{}
+	for _, name := range names {
+		if _, ok := seen[name]; ok {
+			continue
+		}
+		seen[name] = struct{}{}
+		key := settings.GetEnvKey(name)
+		if value, ok := os.LookupEnv(key); ok {
+			values[name] = value
+			continue
+		}
+		remaining = append(remaining, name)
+	}
+
+	if len(remaining) == 0 {
+		return values
+	}
+
+	stored, err := s.listSettings()
+	if err != nil {
+		for _, name := range remaining {
+			values[name] = s.fallback[name]
+		}
+		return values
+	}
+
+	for _, name := range remaining {
+		obj, ok := stored[name]
+		if !ok {
+			values[name] = s.fallback[name]
+			continue
+		}
+		values[name] = effectiveValue(obj, s.fallback[name])
+	}
+
+	return values
+}
+
+func (s *settingsProvider) listSettings() (map[string]*v3.Setting, error) {
+	if s.settingCache != nil {
+		items, err := s.settingCache.List(labels.Everything())
+		if err == nil {
+			result := make(map[string]*v3.Setting, len(items))
+			for _, item := range items {
+				result[item.Name] = item
+			}
+			return result, nil
+		}
+	}
+
+	list, err := s.settings.List(metav1.ListOptions{})
+	if err != nil {
+		return nil, err
+	}
+
+	result := make(map[string]*v3.Setting, len(list.Items))
+	for i := range list.Items {
+		item := &list.Items[i]
+		result[item.Name] = item
+	}
+	return result, nil
+}
+
+func effectiveValue(obj *v3.Setting, fallback string) string {
+	if obj == nil {
+		return fallback
+	}
+	if obj.Value != "" {
+		return obj.Value
+	}
+	if obj.Default != "" {
+		return obj.Default
+	}
+	return fallback
 }
 
 func (s *settingsProvider) Set(name, value string) error {

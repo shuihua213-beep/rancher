@@ -499,6 +499,7 @@ func init() {
 // but are not provided in SetAll call.
 type Provider interface {
 	Get(name string) string
+	GetAll(names ...string) map[string]string
 	Set(name, value string) error
 	SetIfUnset(name, value string) error
 	SetAll(settings map[string]Setting) error
@@ -545,6 +546,17 @@ func (s Setting) Get() string {
 		return s.Default
 	}
 	return provider.Get(s.Name)
+}
+
+func GetValues(names ...string) map[string]string {
+	result := make(map[string]string, len(names))
+	if provider == nil {
+		for _, name := range names {
+			result[name] = settings[name].Default
+		}
+		return result
+	}
+	return provider.GetAll(names...)
 }
 
 // GetDuration will return the currently stored value of the setting as a time.Duration.

@@ -433,6 +433,69 @@ func TestSetAllWithDefaultOnUpgrade(t *testing.T) {
 	})
 }
 
+func TestGetAllUsesCacheList(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	client := fake.NewMockNonNamespacedControllerInterface[*v3.Setting, *v3.SettingList](ctrl)
+	cache := fake.NewMockNonNamespacedCacheInterface[*v3.Setting](ctrl)
+	provider := settingsProvider{
+		settings:     client,
+		settingCache: cache,
+		fallback: map[string]string{
+			"missing":  "fallback-value",
+			"from-env": "fallback-env",
+		},
+	}
+
+	t.Setenv(settings.GetEnvKey("from-env"), "env-value")
+	cache.EXPECT().List(gomock.Any()).Return([]*v3.Setting{
+		{
+			ObjectMeta: metav1.ObjectMeta{Name: "alpha"},
+			Value:      "configured-value",
+			Default:    "alpha-default",
+		},
+		{
+			ObjectMeta: metav1.ObjectMeta{Name: "beta"},
+			Default:    "beta-default",
+		},
+	}, nil).Times(1)
+
+	values := provider.GetAll("alpha", "beta", "missing", "from-env", "alpha")
+	require.Equal(t, map[string]string{
+		"alpha":    "configured-value",
+		"beta":     "beta-default",
+		"missing":  "fallback-value",
+		"from-env": "env-value",
+	}, values)
+}
+
+func TestGetAllFallsBackToClientList(t *testing.T) {
+	t.Parallel()
+	ctrl := gomock.NewController(t)
+	client := fake.NewMockNonNamespacedControllerInterface[*v3.Setting, *v3.SettingList](ctrl)
+	cache := fake.NewMockNonNamespacedCacheInterface[*v3.Setting](ctrl)
+	provider := settingsProvider{
+		settings:     client,
+		settingCache: cache,
+		fallback: map[string]string{
+			"missing": "fallback-value",
+		},
+	}
+
+	cache.EXPECT().List(gomock.Any()).Return(nil, errors.New("cache not ready")).Times(1)
+	client.EXPECT().List(gomock.Any()).Return(&v3.SettingList{Items: []v3.Setting{
+		{
+			ObjectMeta: metav1.ObjectMeta{Name: "beta"},
+			Default:    "beta-default",
+		},
+	}}, nil).Times(1)
+
+	values := provider.GetAll("beta", "missing")
+	require.Equal(t, map[string]string{
+		"beta":    "beta-default",
+		"missing": "fallback-value",
+	}, values)
+}
+
 func storeOperations(store map[string]v3.Setting) (get, set, list) {
 	get := func(name string, opts metav1.GetOptions) (*v3.Setting, error) {
 		val, ok := store[name]
