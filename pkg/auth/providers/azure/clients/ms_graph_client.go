@@ -27,6 +27,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"golang.org/x/sync/singleflight"
 )
 
 const (
@@ -36,6 +37,8 @@ const (
 	providerLogPrefix = "AZUREAD_PROVIDER"
 	cacheLogPrefix    = "AZUREAD_PROVIDER_CACHE"
 )
+
+var userGroupPrincipalsLookup singleflight.Group
 
 // NewMSGraphClient creates and returns a new client for accessing the Azure
 // Graph client.
@@ -99,6 +102,7 @@ func NewMSGraphClient(config *v3.AzureADConfig, secrets wcorev1.SecretController
 	return &AzureMSGraphClient{
 		Credential:         cred,
 		GraphEndpointURL:   graphEndpoint,
+		GroupRequestKey:    authorityURL,
 		GraphClient:        graphClient,
 		ConfidentialClient: confidentialClient,
 		authResult:         authResult,
@@ -109,10 +113,12 @@ func NewMSGraphClient(config *v3.AzureADConfig, secrets wcorev1.SecretController
 type AzureMSGraphClient struct {
 	confidential.Credential
 	GraphEndpointURL   string
+	GroupRequestKey    string
 	authResult         *customAuthResult
 	ConfidentialClient confidential.Client
 
-	GraphClient *msgraphsdk.GraphServiceClient
+	GraphClient               *msgraphsdk.GraphServiceClient
+	listGroupMembershipsFunc  func(ctx context.Context, userID string, filter string, f func(*models.Group)) error
 }
 
 // GetUser takes a user ID and fetches the user principal from the Microsoft Graph API.
@@ -289,23 +295,44 @@ func (c AzureMSGraphClient) LoginUser(config *v3.AzureADConfig, credential *v3.A
 	return userPrincipal, groupPrincipals, "", rawIDToken, nil
 }
 
+func (c AzureMSGraphClient) listGroupMembershipsLoader(ctx context.Context, userID string, filter string, f func(*models.Group)) error {
+	if c.listGroupMembershipsFunc != nil {
+		return c.listGroupMembershipsFunc(ctx, userID, filter, f)
+	}
+
+	return c.listGroupMemberships(ctx, userID, filter, f)
+}
+
 func (c AzureMSGraphClient) listGroupPrincipals(ctx context.Context, userPrincipal v3.Principal, filter string) ([]v3.Principal, error) {
-	var groups []string
-	err := c.listGroupMemberships(ctx, GetPrincipalID(userPrincipal), filter, func(g *models.Group) {
-		if id := g.GetId(); id != nil && g.GetDisplayName() != nil && g.GetSecurityEnabled() != nil {
-			groups = append(groups, *id)
+	userID := GetPrincipalID(userPrincipal)
+	lookupKey := c.GroupRequestKey + "\x00" + userID + "\x00" + filter
+
+	result, err, _ := userGroupPrincipalsLookup.Do(lookupKey, func() (interface{}, error) {
+		groupPrincipals := make([]v3.Principal, 0)
+		err := c.listGroupMembershipsLoader(ctx, userID, filter, func(g *models.Group) {
+			if id := g.GetId(); id != nil && g.GetDisplayName() != nil && g.GetSecurityEnabled() != nil {
+				groupPrincipal := groupToPrincipal(g)
+				groupPrincipal.MemberOf = true
+				cacheGroupPrincipal(*id, groupPrincipal)
+				groupPrincipals = append(groupPrincipals, groupPrincipal)
+			}
+		})
+		if err != nil {
+			return nil, fmt.Errorf("listing group memberships: %w", err)
 		}
+
+		return groupPrincipals, nil
 	})
 	if err != nil {
-		return nil, fmt.Errorf("listing group memberships: %w", err)
+		return nil, err
 	}
 
-	groupPrincipals, err := UserGroupsToPrincipals(c, groups)
-	if err != nil {
-		return nil, fmt.Errorf("converting groups to principals: %w", err)
+	groupPrincipals, ok := result.([]v3.Principal)
+	if !ok {
+		return nil, fmt.Errorf("converting groups to principals: unexpected result type %T", result)
 	}
 
-	return groupPrincipals, nil
+	return append([]v3.Principal(nil), groupPrincipals...), nil
 }
 
 func (c AzureMSGraphClient) getOIDFromLogin(config *v3.AzureADConfig, credential *v3.AzureADLogin) (oid string, rawIDToken string, err error) {

@@ -1,19 +1,80 @@
 package clients
 
 import (
+	"fmt"
 	"time"
 
 	lru "github.com/hashicorp/golang-lru"
 	v3 "github.com/rancher/rancher/pkg/apis/management.cattle.io/v3"
 	"github.com/sirupsen/logrus"
 	"golang.org/x/sync/errgroup"
+	"golang.org/x/sync/singleflight"
 )
 
 // GroupCache is an in-memory cache of group principals.
 var GroupCache *lru.Cache
 
+var groupLookupGroup singleflight.Group
+
 type userPrincipalsClient interface {
 	GetGroup(id string) (v3.Principal, error)
+}
+
+func cachedGroupPrincipal(groupID string) (v3.Principal, bool) {
+	if GroupCache == nil {
+		return v3.Principal{}, false
+	}
+
+	principal, ok := GroupCache.Get(groupID)
+	if !ok {
+		return v3.Principal{}, false
+	}
+
+	p, ok := principal.(v3.Principal)
+	if !ok {
+		logrus.Errorf("failed to convert a cached group to principal")
+		return v3.Principal{}, false
+	}
+
+	return p, true
+}
+
+func cacheGroupPrincipal(groupID string, principal v3.Principal) {
+	if GroupCache == nil {
+		return
+	}
+
+	GroupCache.Add(groupID, principal)
+}
+
+func getGroupPrincipal(azureClient userPrincipalsClient, groupID string) (v3.Principal, error) {
+	if principal, ok := cachedGroupPrincipal(groupID); ok {
+		return principal, nil
+	}
+
+	principal, err, _ := groupLookupGroup.Do(groupID, func() (interface{}, error) {
+		if cachedPrincipal, ok := cachedGroupPrincipal(groupID); ok {
+			return cachedPrincipal, nil
+		}
+
+		groupObj, err := azureClient.GetGroup(groupID)
+		if err != nil {
+			return v3.Principal{}, err
+		}
+		groupObj.MemberOf = true
+		cacheGroupPrincipal(groupID, groupObj)
+		return groupObj, nil
+	})
+	if err != nil {
+		return v3.Principal{}, err
+	}
+
+	groupPrincipal, ok := principal.(v3.Principal)
+	if !ok {
+		return v3.Principal{}, fmt.Errorf("failed to convert a fetched group to principal")
+	}
+
+	return groupPrincipal, nil
 }
 
 // UserGroupsToPrincipals attempts to convert a value representing a collection of groups to a slice of principal values.
@@ -33,30 +94,18 @@ func UserGroupsToPrincipals(azureClient userPrincipalsClient, groupNames []strin
 		j := i
 		groupID := id
 
-		if principal, ok := GroupCache.Get(groupID); ok {
-			p, ok := principal.(v3.Principal)
-			if !ok {
-				logrus.Errorf("failed to convert a cached group to principal")
-				continue
-			}
-			groupPrincipals[j] = p
+		if principal, ok := cachedGroupPrincipal(groupID); ok {
+			groupPrincipals[j] = principal
 			continue
 		}
 
 		tasksManager.Go(func() error {
-			// This is inefficient for a collection of msgraph.Group. This is temporary - until support for Azure AD Graph is removed.
-			// The SDK for Microsoft Graph returns actual groups when queried for a user's group memberships.
-			// The SDK for Azure AD Graph returns group names as strings.
-			// The common interface that abstracts the Graph operations returns group names as strings.
-			// So Microsoft Graph groups are effectively fetched twice. But this happens only once - before the groups are added to the cache.
-			groupObj, err := azureClient.GetGroup(groupID)
+			groupObj, err := getGroupPrincipal(azureClient, groupID)
 			if err != nil {
 				logrus.Errorf("[AZURE_PROVIDER] Error getting group: %v", err)
 				return err
 			}
-			groupObj.MemberOf = true
 
-			GroupCache.Add(groupID, groupObj)
 			groupPrincipals[j] = groupObj
 			return nil
 		})
