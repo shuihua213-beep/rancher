@@ -10,10 +10,9 @@ func Register(server *steve.Server) {
 	server.SchemaFactory.AddTemplate(schema2.Template{
 		Group: "management.cattle.io",
 		Kind:  "Setting",
-		Formatter: func(request *types.APIRequest, resource *types.RawResource) {
-			data := resource.APIObject.Data()
-			if data.String("value") == "" {
-				data.Set("value", data.String("default"))
+		StoreFactory: func(innerStore types.Store) types.Store {
+			return &store{
+				Store: innerStore,
 			}
 		},
 	})

@@ -1,0 +1,276 @@
+package settings
+
+import (
+	"testing"
+
+	"github.com/rancher/apiserver/pkg/types"
+	v3 "github.com/rancher/rancher/pkg/apis/management.cattle.io/v3"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+)
+
+type fakeStore struct {
+	settings map[string]*v3.Setting
+}
+
+func (f *fakeStore) ByID(apiOp *types.APIRequest, schema *types.APISchema, id string) (types.APIObject, error) {
+	s, ok := f.settings[id]
+	if !ok {
+		return types.APIObject{}, nil
+	}
+	return types.APIObject{
+		Type:   schema.ID,
+		ID:     id,
+		Object: s,
+	}, nil
+}
+
+func (f *fakeStore) List(apiOp *types.APIRequest, schema *types.APISchema) (types.APIObjectList, error) {
+	objects := make([]types.APIObject, 0, len(f.settings))
+	for name, s := range f.settings {
+		objects = append(objects, types.APIObject{
+			Type:   schema.ID,
+			ID:     name,
+			Object: s,
+		})
+	}
+	return types.APIObjectList{Objects: objects}, nil
+}
+
+func (f *fakeStore) Watch(apiOp *types.APIRequest, schema *types.APISchema, wr types.WatchRequest) (chan types.APIEvent, error) {
+	ch := make(chan types.APIEvent, len(f.settings))
+	for name, s := range f.settings {
+		ch <- types.APIEvent{
+			Name: name,
+			Object: types.APIObject{
+				Type:   schema.ID,
+				ID:     name,
+				Object: s,
+			},
+		}
+	}
+	close(ch)
+	return ch, nil
+}
+
+func (f *fakeStore) Create(apiOp *types.APIRequest, schema *types.APISchema, data types.APIObject) (types.APIObject, error) {
+	return types.APIObject{}, nil
+}
+
+func (f *fakeStore) Update(apiOp *types.APIRequest, schema *types.APISchema, data types.APIObject, id string) (types.APIObject, error) {
+	return types.APIObject{}, nil
+}
+
+func (f *fakeStore) Delete(apiOp *types.APIRequest, schema *types.APISchema, id string) (types.APIObject, error) {
+	return types.APIObject{}, nil
+}
+
+func newSetting(name, value, def string) *v3.Setting {
+	return &v3.Setting{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: name,
+		},
+		Value:   value,
+		Default: def,
+	}
+}
+
+func TestStoreByID(t *testing.T) {
+	tests := []struct {
+		name        string
+		settings    map[string]*v3.Setting
+		queryID     string
+		wantValue   string
+		wantDefault string
+	}{
+		{
+			name: "empty value should fallback to default",
+			settings: map[string]*v3.Setting{
+				"test-setting": newSetting("test-setting", "", "default-value"),
+			},
+			queryID:     "test-setting",
+			wantValue:   "default-value",
+			wantDefault: "default-value",
+		},
+		{
+			name: "non-empty value should be preserved",
+			settings: map[string]*v3.Setting{
+				"test-setting": newSetting("test-setting", "custom-value", "default-value"),
+			},
+			queryID:     "test-setting",
+			wantValue:   "custom-value",
+			wantDefault: "default-value",
+		},
+		{
+			name: "empty value and empty default",
+			settings: map[string]*v3.Setting{
+				"test-setting": newSetting("test-setting", "", ""),
+			},
+			queryID:     "test-setting",
+			wantValue:   "",
+			wantDefault: "",
+		},
+		{
+			name: "setting not found",
+			settings:    map[string]*v3.Setting{},
+			queryID:     "non-existent",
+			wantValue:   "",
+			wantDefault: "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := &store{
+				Store: &fakeStore{settings: tt.settings},
+			}
+			result, err := s.ByID(nil, &types.APISchema{ID: "setting"}, tt.queryID)
+			require.NoError(t, err)
+
+			if tt.queryID == "non-existent" {
+				assert.Empty(t, result.ID)
+				return
+			}
+
+			data := result.Data()
+			assert.Equal(t, tt.wantValue, data.String("value"))
+			assert.Equal(t, tt.wantDefault, data.String("default"))
+		})
+	}
+}
+
+func TestStoreList(t *testing.T) {
+	tests := []struct {
+		name       string
+		settings   map[string]*v3.Setting
+		wantValues map[string]string
+	}{
+		{
+			name: "batch process multiple settings with mixed values",
+			settings: map[string]*v3.Setting{
+				"setting-a": newSetting("setting-a", "", "default-a"),
+				"setting-b": newSetting("setting-b", "custom-b", "default-b"),
+				"setting-c": newSetting("setting-c", "", "default-c"),
+				"setting-d": newSetting("setting-d", "custom-d", "default-d"),
+			},
+			wantValues: map[string]string{
+				"setting-a": "default-a",
+				"setting-b": "custom-b",
+				"setting-c": "default-c",
+				"setting-d": "custom-d",
+			},
+		},
+		{
+			name: "all settings have values",
+			settings: map[string]*v3.Setting{
+				"setting-a": newSetting("setting-a", "value-a", "default-a"),
+				"setting-b": newSetting("setting-b", "value-b", "default-b"),
+			},
+			wantValues: map[string]string{
+				"setting-a": "value-a",
+				"setting-b": "value-b",
+			},
+		},
+		{
+			name: "all settings have empty values",
+			settings: map[string]*v3.Setting{
+				"setting-a": newSetting("setting-a", "", "default-a"),
+				"setting-b": newSetting("setting-b", "", "default-b"),
+			},
+			wantValues: map[string]string{
+				"setting-a": "default-a",
+				"setting-b": "default-b",
+			},
+		},
+		{
+			name:       "empty settings list",
+			settings:   map[string]*v3.Setting{},
+			wantValues: map[string]string{},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := &store{
+				Store: &fakeStore{settings: tt.settings},
+			}
+			result, err := s.List(nil, &types.APISchema{ID: "setting"})
+			require.NoError(t, err)
+
+			assert.Len(t, result.Objects, len(tt.wantValues))
+
+			for _, obj := range result.Objects {
+				data := obj.Data()
+				expectedValue, ok := tt.wantValues[obj.ID]
+				require.True(t, ok, "unexpected setting: %s", obj.ID)
+				assert.Equal(t, expectedValue, data.String("value"))
+			}
+		})
+	}
+}
+
+func TestStoreWatch(t *testing.T) {
+	settings := map[string]*v3.Setting{
+		"setting-a": newSetting("setting-a", "", "default-a"),
+		"setting-b": newSetting("setting-b", "custom-b", "default-b"),
+	}
+
+	s := &store{
+		Store: &fakeStore{settings: settings},
+	}
+
+	ch, err := s.Watch(nil, &types.APISchema{ID: "setting"}, types.WatchRequest{})
+	require.NoError(t, err)
+
+	received := make(map[string]string)
+	for event := range ch {
+		data := event.Object.Data()
+		received[event.Name] = data.String("value")
+	}
+
+	assert.Equal(t, "default-a", received["setting-a"])
+	assert.Equal(t, "custom-b", received["setting-b"])
+}
+
+func TestApplyDefault(t *testing.T) {
+	tests := []struct {
+		name        string
+		setting     *v3.Setting
+		wantValue   string
+		wantDefault string
+	}{
+		{
+			name:        "empty value falls back to default",
+			setting:     newSetting("test", "", "my-default"),
+			wantValue:   "my-default",
+			wantDefault: "my-default",
+		},
+		{
+			name:        "non-empty value preserved",
+			setting:     newSetting("test", "my-value", "my-default"),
+			wantValue:   "my-value",
+			wantDefault: "my-default",
+		},
+		{
+			name:        "both empty",
+			setting:     newSetting("test", "", ""),
+			wantValue:   "",
+			wantDefault: "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			obj := types.APIObject{
+				Type:   "setting",
+				ID:     tt.setting.Name,
+				Object: tt.setting,
+			}
+			applyDefault(obj)
+			data := obj.Data()
+			assert.Equal(t, tt.wantValue, data.String("value"))
+			assert.Equal(t, tt.wantDefault, data.String("default"))
+		})
+	}
+}
